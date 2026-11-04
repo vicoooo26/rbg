@@ -33,6 +33,36 @@ spec:
   volumes:
     - name: gpu-lib
       emptyDir: {}
+  # containerPatches: RFC 6902 `add` ops applied to the containers listed
+  # in the referencing engineRuntimes[] entry's patchContainers, within
+  # that entry's named component. Ops apply in list order; `/X/0`
+  # head-inserts, so a multi-element command prepend is written in reverse
+  # (the rendered command below is ["/opt/gpu/wrap", "exec", "nginx"]).
+  containerPatches:
+    - jsonPatch:
+        op: add
+        path: /command/0
+        value: "exec"
+    - jsonPatch:
+        op: add
+        path: /command/0
+        value: "/opt/gpu/wrap"
+    - jsonPatch:
+        op: add
+        path: /env/-
+        value:
+          name: GPU_WRAPPER_SITE
+          value: /opt/gpu/site
+    - jsonPatch:
+        op: add
+        path: /volumeMounts/-
+        value:
+          name: gpu-lib
+          mountPath: /usr/local/lib/gpu
+    - jsonPatch:
+        op: add
+        path: /securityContext/capabilities/add/-
+        value: SYS_RESOURCE
 
 ---
 # Step 2: Create a RoleBasedGroup referencing the engine runtime profile
@@ -45,18 +75,27 @@ spec:
   roles:
     - name: prefill
       replicas: 2
-      # engineRuntimes: inject the profile into specified containers of this role
+      # engineRuntimes: reference the profile. component scopes the
+      # reference to one component of the role's pattern; patchContainers
+      # consents to the profile's containerPatches at the named role
+      # containers. Without consent the fragments still inject, but the
+      # patches do not fire (an UnaimedContainerPatch warning event is
+      # emitted).
       engineRuntimes:
         - profileName: nvidia-runtime-profile
-          # injectContainers: which containers to inject the runtime into
-          injectContainers:
+          component: worker
+          patchContainers:
             - prefill-main
-      standalonePattern:
+      leaderWorkerPattern:
+        size: 2
         template:
           spec:
             containers:
+              # A patch may only prepend to a declared command — creating one
+              # would silently discard the image ENTRYPOINT — so declare it.
               - name: prefill-main
                 image: anolis-registry.cn-zhangjiakou.cr.aliyuncs.com/openanolis/nginx:1.14.1-8.6
+                command: ["nginx"]
                 ports:
                   - containerPort: 8080
                 resources:
@@ -69,14 +108,17 @@ spec:
       replicas: 4
       engineRuntimes:
         - profileName: nvidia-runtime-profile
-          injectContainers:
+          component: worker
+          patchContainers:
             - decode-main
-      standalonePattern:
+      leaderWorkerPattern:
+        size: 2
         template:
           spec:
             containers:
               - name: decode-main
                 image: anolis-registry.cn-zhangjiakou.cr.aliyuncs.com/openanolis/nginx:1.14.1-8.6
+                command: ["nginx"]
                 ports:
                   - containerPort: 8081
                 resources:

@@ -137,9 +137,19 @@ Reusable pod template at RBG level:
 
 | Field | Description |
 |-------|-------------|
-| `profileName` | string — ClusterEngineRuntimeProfile name |
-| `injectContainers` | []string — target container names |
-| `containers` | []Container — override container configs |
+| `profileName` | string — ClusterEngineRuntimeProfile name (required) |
+| `component` | string — component scope: `leader` or `worker` under leaderWorkerPattern, a declared component name under customComponentsPattern. Absent, the fragments (and the legacy `containers` merge) deliver to every component of the pattern. Required whenever a patch field is set |
+| `patchContainers` | []string — bare container names consenting to the profile's `containerPatches` within the named component (requires `component`) |
+| `containerPatches` | []EngineRuntimeContainerPatch — the role's patches into the profile-declared containers within the named component (requires `component`); each entry sets exactly one patch field — today `jsonPatch` |
+| `containers` | []Container — legacy: role-provided env/args appended to profile-declared containers; superseded by `containerPatches` |
+| `injectContainers` | []string — inert: accepted and ignored, nothing reads it; removed at the next API version boundary |
+
+### EngineRuntimeContainerPatch
+
+| Field | Description |
+|-------|-------------|
+| `container` | string — profile-declared container (init container or sidecar) this entry patches, within the reference's named component (required) |
+| `jsonPatch` | ContainerJSONPatch — the RFC 6902 format. Exactly one patch field must be set; today `jsonPatch` is the only one |
 
 ## RoleBasedGroupStatus
 
@@ -249,6 +259,26 @@ Reusable pod template at RBG level:
 | `initContainers` | []Container — init containers to inject |
 | `containers` | []Container — sidecar containers to inject |
 | `volumes` | []Volume — volumes to inject |
+| `containerPatches` | []ContainerPatch — ordered per-container modifications applied to the role containers a referencing `engineRuntimes[]` entry consents to: the entry names a `component` and lists the target containers in `patchContainers` (a CEL rule requires `component` whenever a patch field is set). Each element sets exactly one patch field. Optional, 1–32 items |
+
+### ContainerPatch
+
+| Field | Description |
+|-------|-------------|
+| `jsonPatch` | ContainerJSONPatch — the RFC 6902 format. Exactly one patch field must be set; today `jsonPatch` is the only one, and a future patch format joins as a sibling field |
+
+### ContainerJSONPatch
+
+| Field | Description |
+|-------|-------------|
+| `op` | string — patch operation; only `add` is accepted |
+| `path` | string — RFC 6901 pointer, relative to the target container. Must be an element pointer under `/command`, `/args`, `/env`, `/volumeMounts` or `/securityContext/capabilities/add` |
+| `value` | object — raw JSON matching the path's element shape: a string for `/command`, `/args` and capability elements; a corev1 EnvVar object for `/env`; a corev1 VolumeMount object for `/volumeMounts` |
+
+Ops apply in list order (later ops see earlier ops' mutations; `add /command/0`
+head-inserts, so multi-element prepends are written in reverse). A same-named
+env var already present in the container is a render error — `add` cannot join
+values.
 
 ## RoleInstanceSet Rollback Recovery
 

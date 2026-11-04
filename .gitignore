@@ -33,6 +33,10 @@ test/e2e/**/artifacts/
 # Track shared skills (team assets), ignore personal .claude/ content (memory, settings, etc.)
 .claude/*
 !.claude/skills/
+
+# Locally generated planning notes (superpowers writing-plans output)
+docs/superpowers/
+
 *.swp
 *.swo
 *~
