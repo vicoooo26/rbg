@@ -1048,7 +1048,8 @@ func TestApplyRoleEngineRuntimePatchesOneWay(t *testing.T) {
 	ctx := context.Background()
 
 	// roleVolumeNames snapshots the role-declared pod volumes the way the
-	// reconciler does, before any fragment injection.
+	// reconciler does, before ANY injection — the built-in injector chain
+	// included, so controller-injected volumes are not role content.
 	roleVolumeNames := map[string]struct{}{"role-vol": {}}
 	roleVol := v1.Volume{
 		Name:         "role-vol",
@@ -1155,6 +1156,57 @@ func TestApplyRoleEngineRuntimePatchesOneWay(t *testing.T) {
 		sidecar := findRenderedContainer(spec, "runtime-sidecar")
 		require.NotNil(t, sidecar)
 		assert.Equal(t, []string{"POD_NAME", "CPU_REQ", "PLAIN"}, envNames(*sidecar))
+	})
+
+	t.Run("a role-declared volume mounted into a profile-declared init container is a render error", func(t *testing.T) {
+		// D8 resolves profile-declared targets across both lists — init
+		// containers included — so D9 must refuse there too: a role volume
+		// may not land in the publisher-controlled init container any more
+		// than in a sidecar.
+		spec := renderedWithProfile()
+		err := ApplyRoleEngineRuntimePatches(ctx, spec, roleContainers("engine"), nil, roleVolumeNames, []EngineRuntimeRolePatch{{
+			ProfileName:        "ik",
+			DeclaredContainers: declaredContainersOf(declaringProfile("ik")),
+			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
+				roleJp("runtime-init", "/volumeMounts/-", v1.VolumeMount{Name: "role-vol", MountPath: "/data"}),
+			},
+		}}, "worker")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `role "worker" engineRuntimes["ik"].containerPatches[0]`)
+		assert.Contains(t, err.Error(), "violates the one-way principle")
+		assert.Contains(t, err.Error(), `"role-vol"`)
+		// the profile-declared init container gained nothing
+		require.Len(t, spec.Spec.InitContainers, 1)
+		assert.Empty(t, spec.Spec.InitContainers[0].VolumeMounts)
+	})
+
+	t.Run("the controller-injected rbg-cluster-config volume mounted into a profile-declared container is legal", func(t *testing.T) {
+		// The controller's own injection is not role content — the same
+		// stance the KEP takes for the built-in RBG_* env vars. The
+		// roleVolumeNames snapshot is captured before the built-in injector
+		// chain runs, so the config volume InjectConfig appends after the
+		// snapshot is not in it, and a role-side patch mounting it into a
+		// profile-declared container breaches no one-way bound.
+		spec := renderedWithProfile()
+		spec.Spec.Volumes = append(spec.Spec.Volumes, v1.Volume{
+			Name: "rbg-cluster-config",
+			VolumeSource: v1.VolumeSource{ConfigMap: &v1.ConfigMapVolumeSource{
+				LocalObjectReference: v1.LocalObjectReference{Name: "resolver-rbg"},
+			}},
+		})
+		require.NoError(t, ApplyRoleEngineRuntimePatches(ctx, spec, roleContainers("engine"), nil, roleVolumeNames, []EngineRuntimeRolePatch{{
+			ProfileName:        "ik",
+			DeclaredContainers: declaredContainersOf(declaringProfile("ik")),
+			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
+				roleJp("runtime-sidecar", "/volumeMounts/-", v1.VolumeMount{
+					Name: "rbg-cluster-config", MountPath: "/etc/rbg", ReadOnly: true,
+				}),
+			},
+		}}, "worker"))
+		sidecar := findRenderedContainer(spec, "runtime-sidecar")
+		require.NotNil(t, sidecar)
+		require.Len(t, sidecar.VolumeMounts, 1)
+		assert.Equal(t, "rbg-cluster-config", sidecar.VolumeMounts[0].Name)
 	})
 
 	t.Run("the same volume mount and secret env into a role-declared container is legal", func(t *testing.T) {

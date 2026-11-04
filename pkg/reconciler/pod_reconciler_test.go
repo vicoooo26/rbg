@@ -18,6 +18,7 @@ package reconciler
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"testing"
@@ -803,6 +804,88 @@ func TestPodReconciler_EngineRuntimePositionVocabularyGuard(t *testing.T) {
 		// no vocabulary: nothing is routed, so nothing can be mis-keyed
 		require.NoError(t, render(t, discovery.StandalonePositionName, &discovery.EngineRuntimePlan{}))
 	})
+}
+
+// TestPodReconciler_OneWayVolumeSnapshotBeforeInjection pins the D9 volume
+// snapshot boundary: roleVolumeNames must be captured from the resolved role
+// template before ANY injection runs, so the controller's own
+// rbg-cluster-config volume (appended by InjectConfig for stateful roles) is
+// never mistaken for role-authored content — a role-side patch mounting it
+// into a profile-declared container is legal, the same stance the KEP takes
+// for the built-in RBG_* env vars. A snapshot taken after InjectConfig would
+// falsely refuse the mount as a role-declared volume.
+func TestPodReconciler_OneWayVolumeSnapshotBeforeInjection(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = workloadsv1alpha2.AddToScheme(scheme)
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	// the default workload type is stateful, so InjectConfig appends the
+	// rbg-cluster-config volume to the role's own (volume-less) template
+	rbg := wrappersv2.BuildBasicRoleBasedGroup("one-way-rbg", "default").Obj()
+	role := &rbg.Spec.Roles[0]
+
+	mountRaw, err := json.Marshal(corev1.VolumeMount{
+		Name: "rbg-cluster-config", MountPath: "/etc/rbg", ReadOnly: true,
+	})
+	require.NoError(t, err)
+
+	reconciler := NewPodReconciler(scheme, client)
+	reconciler.SetInjectors([]string{configInjector})
+	reconciler.SetEngineRuntimePlan(discovery.StandalonePositionName, &discovery.EngineRuntimePlan{
+		FragmentApplications: map[string][]discovery.EngineRuntimeFragment{
+			discovery.StandalonePositionName: {{
+				Profile: &workloadsv1alpha2.ClusterEngineRuntimeProfile{
+					ObjectMeta: metav1.ObjectMeta{Name: "rt"},
+					Spec: workloadsv1alpha2.ClusterEngineRuntimeProfileSpec{
+						Containers: []corev1.Container{{Name: "runtime-sidecar", Image: "rt-sidecar:latest"}},
+					},
+				},
+			}},
+		},
+		RolePatchApplications: map[string][]discovery.EngineRuntimeRolePatch{
+			discovery.StandalonePositionName: {{
+				ProfileName:        "rt",
+				DeclaredContainers: map[string]struct{}{"runtime-sidecar": {}},
+				Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{{
+					Container: "runtime-sidecar",
+					JSONPatch: &workloadsv1alpha2.ContainerJSONPatch{
+						Op: "add", Path: "/volumeMounts/-",
+						Value: runtime.RawExtension{Raw: mountRaw},
+					},
+				}},
+			}},
+		},
+		RoleName: role.Name,
+	})
+
+	result, err := reconciler.ConstructPodTemplateSpecApplyConfiguration(
+		context.Background(), rbg, role, nil,
+	)
+	require.NoError(t, err,
+		"the controller's own config volume injection is not role content — mounting it into a profile-declared container breaches no one-way bound")
+
+	// the config injector ran: the controller's volume is rendered
+	configVolRendered := false
+	for _, vol := range result.Spec.Volumes {
+		if vol.Name != nil && *vol.Name == "rbg-cluster-config" {
+			configVolRendered = true
+		}
+	}
+	assert.True(t, configVolRendered, "expected the controller-injected rbg-cluster-config volume")
+
+	// and the role-side patch mounted it into the profile-declared sidecar
+	sidecarMounts := []string{}
+	for _, c := range result.Spec.Containers {
+		if c.Name != nil && *c.Name == "runtime-sidecar" {
+			for _, vm := range c.VolumeMounts {
+				if vm.Name != nil {
+					sidecarMounts = append(sidecarMounts, *vm.Name)
+				}
+			}
+		}
+	}
+	assert.Equal(t, []string{"rbg-cluster-config"}, sidecarMounts)
 }
 
 func Test_setExclusiveAffinities(t *testing.T) {

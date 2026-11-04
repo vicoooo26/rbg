@@ -112,6 +112,22 @@ func (r *PodReconciler) ConstructPodTemplateSpecApplyConfiguration(
 	if podAnnotations == nil {
 		podAnnotations = make(map[string]string)
 	}
+	// The role-declared volume names are snapshotted BEFORE any injection
+	// runs — the clean D9 ownership boundary: "role-declared" means authored
+	// by the role author, and controller-injected content (the built-in
+	// rbg-cluster-config volume InjectConfig appends for stateful roles) is
+	// neither role- nor profile-declared, so a role-side patch mounting it
+	// into a profile-declared container breaches no one-way bound — the same
+	// stance the KEP takes for the built-in RBG_* env vars. InjectConfig adds
+	// no containers or init containers, so the container snapshots below
+	// (taken before the fragment pass) are unaffected by it.
+	var roleContainerNames, roleInitContainerNames, roleVolumeNames map[string]struct{}
+	if r.engineRuntimePlan != nil {
+		roleVolumeNames = make(map[string]struct{}, len(podTemplateSpec.Spec.Volumes))
+		for _, vol := range podTemplateSpec.Spec.Volumes {
+			roleVolumeNames[vol.Name] = struct{}{}
+		}
+	}
 	// inject objects
 	injector := discovery.NewDefaultInjector(r.scheme, r.client)
 	if r.injectObjects == nil {
@@ -122,7 +138,6 @@ func (r *PodReconciler) ConstructPodTemplateSpecApplyConfiguration(
 			return nil, fmt.Errorf("failed to inject config: %w", err)
 		}
 	}
-	var roleContainerNames, roleInitContainerNames, roleVolumeNames map[string]struct{}
 	if r.engineRuntimePlan != nil {
 		if r.engineRuntimePosition == "" {
 			return nil, fmt.Errorf("engine runtime plan is set but the template's position is not")
@@ -144,14 +159,15 @@ func (r *PodReconciler) ConstructPodTemplateSpecApplyConfiguration(
 			}
 			return nil, err
 		}
-		// The role-declared container names, captured before any injection,
-		// are the sole targeting boundary for profile-side patches:
+		// The role-declared container names, captured before the fragment
+		// pass, are the sole targeting boundary for profile-side patches:
 		// profile-injected containers are never addressable. Role-side
 		// targets additionally resolve to role-declared init containers and
 		// this reference's profile-declared containers (D8). The
-		// role-declared volume names snapshot enforces D9 for those
-		// profile-declared targets: a role-side patch may not mount one into
-		// them — the one-way principle.
+		// role-declared volume names — snapshotted above, before the
+		// built-in injector chain — enforce D9 for those profile-declared
+		// targets: a role-side patch may not mount one into them — the
+		// one-way principle.
 		roleContainerNames = make(map[string]struct{}, len(podTemplateSpec.Spec.Containers))
 		for _, c := range podTemplateSpec.Spec.Containers {
 			roleContainerNames[c.Name] = struct{}{}
@@ -159,10 +175,6 @@ func (r *PodReconciler) ConstructPodTemplateSpecApplyConfiguration(
 		roleInitContainerNames = make(map[string]struct{}, len(podTemplateSpec.Spec.InitContainers))
 		for _, c := range podTemplateSpec.Spec.InitContainers {
 			roleInitContainerNames[c.Name] = struct{}{}
-		}
-		roleVolumeNames = make(map[string]struct{}, len(podTemplateSpec.Spec.Volumes))
-		for _, vol := range podTemplateSpec.Spec.Volumes {
-			roleVolumeNames[vol.Name] = struct{}{}
 		}
 		discovery.InjectEngineRuntimeFragments(
 			ctx, &podTemplateSpec,
