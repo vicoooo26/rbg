@@ -103,7 +103,7 @@ Patches fire only where a role reference consents. Consent has two parts, both r
 
 ## Using Engine Runtime Profiles
 
-In RoleBasedGroup, reference the profile via `engineRuntimes` field. A reference that sets only `profileName` delivers the fragments to every component of the role's pattern; a reference that also names a `component` narrows the delivery to that component and may carry patch consent:
+In RoleBasedGroup, reference the profile via `engineRuntimes` field. A reference that sets only `profileName` delivers the fragments to the pattern's default component set — the leader only under leaderWorkerPattern, every declared component under customComponentsPattern, the single implicit component under standalonePattern; a reference that also names a `component` narrows the delivery to that component and may carry patch consent:
 
 ```yaml
 apiVersion: workloads.x-k8s.io/v1alpha2
@@ -114,7 +114,8 @@ spec:
   roles:
     - name: prefill
       replicas: 2
-      # component absent: fragments inject into every component
+      # component absent: fragments inject into the pattern's default
+      # component set (leader only under leaderWorkerPattern)
       engineRuntimes:
         - profileName: nvidia-runtime-profile
       leaderWorkerPattern:
@@ -155,20 +156,28 @@ spec:
 | Field | Description |
 |-------|-------------|
 | `profileName` | Name of the ClusterEngineRuntimeProfile to use (required) |
-| `component` | Component the reference scopes to: `leader` or `worker` under leaderWorkerPattern, a declared component name under customComponentsPattern. Absent, the fragments (and the legacy `containers` merge) deliver to every component of the pattern. Required whenever `patchContainers` or `containerPatches` is set |
+| `component` | Component the reference scopes to: `leader` or `worker` under leaderWorkerPattern, a declared component name under customComponentsPattern. Absent, the fragments (and the legacy `containers` merge) deliver to the pattern's default component set — the leader only under leaderWorkerPattern, every declared component under customComponentsPattern, the single implicit component under standalonePattern. Required whenever `patchContainers` or `containerPatches` is set |
 | `patchContainers` | Bare container names consenting to the profile's `containerPatches`, within the named component |
-| `containerPatches` | The role's patches into the profile-declared containers, within the named component; each entry sets exactly one patch field — today `jsonPatch` |
+| `containerPatches` | The role's own patches, within the named component; each entry names its own target container — role-declared or profile-declared — and sets exactly one patch field — today `jsonPatch` |
 | `containers` | Legacy: role-provided env/args appended to profile-declared containers; superseded by `containerPatches` |
 | `injectContainers` | Inert: accepted and ignored, nothing reads it; removed at the next API version boundary |
 
 ## Injection Behavior
 
-When a role references an engine runtime profile, delivery follows the reference's scope: the named `component`, or every component of the pattern when `component` is absent.
+When a role references an engine runtime profile, delivery follows the reference's scope: the named `component`, or the pattern's default component set when `component` is absent — the leader only under leaderWorkerPattern (the worker template runs no sidecar stage unless a reference names `component: worker`), every declared component under customComponentsPattern, the single implicit component under standalonePattern.
 
-1. **Init Containers**: Init containers from the profile are added to the pod spec
-2. **Sidecar Containers**: Containers from the profile are added to the pod spec
-3. **Volumes**: Volumes from the profile are added to the pod spec
-4. **Container Patches**: The profile's `containerPatches` fire at the containers a reference consents to — `component` plus `patchContainers` (a CEL rule rejects either patch field without `component`). Without consent the patches do not fire; if the profile declares `containerPatches`, an `UnaimedContainerPatch` warning event is emitted and the render succeeds
+Application order, per rendered component template:
+
+1. **Pod-level injection** — init containers, sidecars and volumes from the profile, append-if-missing keyed by name, per reference in `engineRuntimes` list order
+2. **Legacy `containers` merge** — role-provided env/args appended to profile-declared containers, interleaved per reference (immediately after that reference's stage-1 append) within the reference's effective scope; an override appending an env var the target already declares is a render error — the shared env-name conflict check spans this merge and both patch passes
+3. **Profile-side `containerPatches`** — the profile's patches fire at the containers a reference consents to — `component` plus `patchContainers` (a CEL rule rejects either patch field without `component`). Without consent the patches do not fire; if the profile declares `containerPatches`, an `UnaimedContainerPatch` warning event is emitted and the render succeeds
+4. **Role-side `containerPatches`** — the role's own patches, in list order, into any container of the component — its own or the profile's — applied last, so what the role writes lands where it is written
+
+The patch passes (stages 3–4) run after the built-in env injectors, which deduplicate-and-reorder env entries across every container of the template: running last keeps the patch grammar the only writer of the entries it appends, and its duplicate-name check also sees the built-in `RBG_*` entries — neither side should append an env name carrying the `RBG_` prefix.
+
+Two rules bound the role-side pass. The one-way principle: a role-side patch aimed at a profile-declared container may not mount a role-declared volume or inject a consuming-namespace `secretKeyRef`/`configMapKeyRef` env value — profile-declared containers consume only profile-declared content, while role-declared containers may consume both sides'. And positional shadowing: a role-side positional insert landing ahead of a profile-side one on the same container emits a warning event rather than failing the render, so the shadowing is never silent.
+
+Any stage error — an unknown target container, a duplicate env-var name, a one-way violation — fails the whole render: the controller emits an `EngineRuntimeRenderFailed` warning event and surfaces the failure as a RoleBasedGroup condition, naming the owning side and index; no partially patched template is delivered.
 
 ## Example: GPU Driver + Monitoring Profile
 

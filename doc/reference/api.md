@@ -138,9 +138,9 @@ Reusable pod template at RBG level:
 | Field | Description |
 |-------|-------------|
 | `profileName` | string — ClusterEngineRuntimeProfile name (required) |
-| `component` | string — component scope: `leader` or `worker` under leaderWorkerPattern, a declared component name under customComponentsPattern. Absent, the fragments (and the legacy `containers` merge) deliver to every component of the pattern. Required whenever a patch field is set |
+| `component` | string — component scope: `leader` or `worker` under leaderWorkerPattern, a declared component name under customComponentsPattern. Absent, the fragments (and the legacy `containers` merge) deliver to the pattern's default component set — the leader only under leaderWorkerPattern, every declared component under customComponentsPattern, the single implicit component under standalonePattern. Required whenever a patch field is set |
 | `patchContainers` | []string — bare container names consenting to the profile's `containerPatches` within the named component (requires `component`) |
-| `containerPatches` | []EngineRuntimeContainerPatch — the role's patches into the profile-declared containers within the named component (requires `component`); each entry sets exactly one patch field — today `jsonPatch` |
+| `containerPatches` | []EngineRuntimeContainerPatch — the role's own patches within the named component (requires `component`); each entry names its own target container — role-declared or profile-declared — and sets exactly one patch field, today `jsonPatch`. Entries apply last, after the profile-side pass; a patch aimed at a profile-declared target may not mount a role-declared volume or inject a consuming-namespace secretKeyRef/configMapKeyRef env value (one-way principle) |
 | `containers` | []Container — legacy: role-provided env/args appended to profile-declared containers; superseded by `containerPatches` |
 | `injectContainers` | []string — inert: accepted and ignored, nothing reads it; removed at the next API version boundary |
 
@@ -148,7 +148,7 @@ Reusable pod template at RBG level:
 
 | Field | Description |
 |-------|-------------|
-| `container` | string — profile-declared container (init container or sidecar) this entry patches, within the reference's named component (required) |
+| `container` | string — this entry's target container — role-declared or profile-declared (init container or sidecar) — within the reference's named component (required). A name the role's own template declares resolves to the role-owned container; a name injected only by a different reference or profile is a render error |
 | `jsonPatch` | ContainerJSONPatch — the RFC 6902 format. Exactly one patch field must be set; today `jsonPatch` is the only one |
 
 ## RoleBasedGroupStatus

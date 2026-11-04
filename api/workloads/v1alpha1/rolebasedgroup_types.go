@@ -404,9 +404,10 @@ func (w *WorkloadSpec) String() string {
 }
 
 // EngineRuntime references one ClusterEngineRuntimeProfile and carries the
-// role's targeting decisions for the profile's two delivery dimensions: the
-// pod-level fragments (initContainers, containers, volumes) and the
-// container patches.
+// role's targeting decisions: where the profile's pod-level fragments
+// (initContainers, containers, volumes) apply, consent for the profile's
+// container patches, and the role's own patches into the reference's
+// component.
 type EngineRuntime struct {
 	// ProfileName specifies the name of the ClusterEngineRuntimeProfile
 	// applied to this role, resolved at render time.
@@ -418,8 +419,12 @@ type EngineRuntime struct {
 	// pattern — `leader` or `worker` under leaderWorkerPattern, a declared
 	// component name under customComponentsPattern. A role consumes the
 	// same profile in several components through several references with
-	// the same profileName. Absent, the profile's pod-level fragments and
-	// the legacy containers merge apply to every component of the pattern.
+	// the same profileName. Absent, the reference keeps the pattern's
+	// default component set: the leader only under leaderWorkerPattern
+	// (the worker template's injector chain omits the sidecar stage), every
+	// declared component under customComponentsPattern, the single implicit
+	// component under standalonePattern — the pod-level fragments and the
+	// legacy containers merge apply to exactly that set.
 	// patchContainers and containerPatches require this field (a CEL rule
 	// rejects either without it), so the patch dimensions always operate on
 	// the one named component. An explicit component on a standalonePattern
@@ -453,14 +458,25 @@ type EngineRuntime struct {
 	// +kubebuilder:validation:XValidation:rule="self.all(p, p.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'))",message="container names must be DNS labels"
 	PatchContainers []string `json:"patchContainers,omitempty"`
 
-	// ContainerPatches expresses the role's patches into the profile's
-	// containers — the direction opposite to patchContainers. Each entry
-	// names one profile-declared container (init container or sidecar)
-	// rendered into the named component and applies one RFC 6902 `add`-only
-	// operation to it, in list order. An entry naming a container the
-	// profile does not declare is a render error. A patch adding an env var
-	// the target already declares (profile-declared, appended by the legacy
-	// containers mechanism, or added by an earlier entry) is a render error.
+	// ContainerPatches expresses the role's own patches into the
+	// reference's component — the direction opposite to patchContainers.
+	// Each entry names its own target container — role-declared or
+	// profile-declared (init container or sidecar) — within the reference's
+	// named component and applies one RFC 6902 `add`-only operation to it,
+	// in list order; anything else is a render error. A role-declared
+	// target neither requires nor consults patchContainers — the consent
+	// list gates the profile's rules only — and every entry here is coupled
+	// to the reference: removing the reference removes them all. Entries
+	// apply after the profile-side pass — what the role writes lands where
+	// it is written; a positional insert landing ahead of a profile-side
+	// one emits a warning event rather than failing the render. A patch
+	// aimed at a profile-declared target may not mount a role-declared
+	// volume or inject a consuming-namespace secretKeyRef/configMapKeyRef
+	// env value — the one-way principle: profile-declared containers
+	// consume only profile-declared content. A patch adding an env var the
+	// target already declares (role- or profile-declared, appended by the
+	// legacy containers mechanism, or added by an earlier entry) is a
+	// render error.
 	//
 	// +optional
 	// +kubebuilder:validation:MinItems=1
@@ -471,8 +487,13 @@ type EngineRuntime struct {
 
 	// Containers appends role-provided env/args to profile-provided
 	// containers, applied within the reference's component scope before
-	// containerPatches. Superseded by containerPatches, which expresses the
-	// same intent with a precise grammar; retained for compatibility.
+	// containerPatches — pod-level append and this merge are interleaved
+	// per reference, ahead of the built-in env injectors. An override entry
+	// appending an env var the target container already declares is a
+	// render error — the shared env-name conflict check spanning this merge
+	// and both patch passes; args appending carries no conflict check.
+	// Superseded by containerPatches, which expresses the same intent with
+	// a precise grammar; retained for compatibility.
 	// +optional
 	Containers []corev1.Container `json:"containers,omitempty"`
 
@@ -486,12 +507,15 @@ type EngineRuntime struct {
 }
 
 // EngineRuntimeContainerPatch is one ordered role-side operation applied to
-// one profile-declared container at render time.
+// one container of the reference's component at render time — the target is
+// role-declared or profile-declared.
 // +kubebuilder:validation:XValidation:rule="has(self.jsonPatch)",message="exactly one patch field must be set"
 type EngineRuntimeContainerPatch struct {
-	// Container names the profile-declared container (init container or
-	// sidecar) this entry patches, in the named component's rendered
-	// template.
+	// Container names this entry's target container — role-declared or
+	// profile-declared (init container or sidecar) — in the named
+	// component's rendered template. A name the role's own template
+	// declares resolves to the role-owned container; a name injected only
+	// by a different reference or profile is a render error.
 	//
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63

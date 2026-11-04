@@ -16529,8 +16529,8 @@ spec:
                       items:
                         description: |-
                           EngineRuntime references one ClusterEngineRuntimeProfile and carries the
-                          role's targeting decisions for the profile's two delivery dimensions: the
-                          pod-level fragments (initContainers, containers,...
+                          role's targeting decisions: where the profile's pod-level fragments
+                          (initContainers, containers, volumes) apply, consent for...
                         properties:
                           component:
                             description: |-
@@ -16543,18 +16543,19 @@ spec:
                             type: string
                           containerPatches:
                             description: |-
-                              ContainerPatches expresses the role's patches into the profile's
-                              containers — the direction opposite to patchContainers.
+                              ContainerPatches expresses the role's own patches into the
+                              reference's component — the direction opposite to patchContainers.
                             items:
                               description: |-
                                 EngineRuntimeContainerPatch is one ordered role-side operation applied to
-                                one profile-declared container at render time.
+                                one container of the reference's component at render time — the target is
+                                role-declared or profile-declared.
                               properties:
                                 container:
                                   description: |-
-                                    Container names the profile-declared container (init container or
-                                    sidecar) this entry patches, in the named component's rendered
-                                    template.
+                                    Container names this entry's target container — role-declared or
+                                    profile-declared (init container or sidecar) — in the named
+                                    component's rendered template.
                                   maxLength: 63
                                   minLength: 1
                                   pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
@@ -16615,7 +16616,7 @@ spec:
                             description: |-
                               Containers appends role-provided env/args to profile-provided
                               containers, applied within the reference's component scope before
-                              containerPatches.
+                              containerPatches — pod-level append and this merge are interleaved...
                             items:
                               description: A single application container that you
                                 want to run within a pod.
@@ -33125,8 +33126,8 @@ spec:
                       items:
                         description: |-
                           EngineRuntime references one ClusterEngineRuntimeProfile and carries the
-                          role's targeting decisions for the profile's two delivery dimensions: the
-                          pod-level fragments (initContainers, containers,...
+                          role's targeting decisions: where the profile's pod-level fragments
+                          (initContainers, containers, volumes) apply, consent for...
                         properties:
                           component:
                             description: |-
@@ -33139,18 +33140,19 @@ spec:
                             type: string
                           containerPatches:
                             description: |-
-                              ContainerPatches expresses the role's patches into the profile's
-                              containers — the direction opposite to patchContainers.
+                              ContainerPatches expresses the role's own patches into the
+                              reference's component — the direction opposite to patchContainers.
                             items:
                               description: |-
                                 EngineRuntimeContainerPatch is one ordered role-side operation applied to
-                                one profile-declared container at render time.
+                                one container of the reference's component at render time — the target is
+                                role-declared or profile-declared.
                               properties:
                                 container:
                                   description: |-
-                                    Container names the profile-declared container (init container or
-                                    sidecar) this entry patches, in the named component's rendered
-                                    template.
+                                    Container names this entry's target container — role-declared or
+                                    profile-declared (init container or sidecar) — in the named
+                                    component's rendered template.
                                   maxLength: 63
                                   minLength: 1
                                   pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
@@ -33211,7 +33213,7 @@ spec:
                             description: |-
                               Containers appends role-provided env/args to profile-provided
                               containers, applied within the reference's component scope before
-                              containerPatches.
+                              containerPatches — pod-level append and this merge are interleaved...
                             items:
                               description: A single application container that you
                                 want to run within a pod.
@@ -57736,8 +57738,8 @@ spec:
                           items:
                             description: |-
                               EngineRuntime references one ClusterEngineRuntimeProfile and carries the
-                              role's targeting decisions for the profile's two delivery dimensions: the
-                              pod-level fragments (initContainers, containers,...
+                              role's targeting decisions: where the profile's pod-level fragments
+                              (initContainers, containers, volumes) apply, consent for...
                             properties:
                               component:
                                 description: |-
@@ -57750,18 +57752,19 @@ spec:
                                 type: string
                               containerPatches:
                                 description: |-
-                                  ContainerPatches expresses the role's patches into the profile's
-                                  containers — the direction opposite to patchContainers.
+                                  ContainerPatches expresses the role's own patches into the
+                                  reference's component — the direction opposite to patchContainers.
                                 items:
                                   description: |-
                                     EngineRuntimeContainerPatch is one ordered role-side operation applied to
-                                    one profile-declared container at render time.
+                                    one container of the reference's component at render time — the target is
+                                    role-declared or profile-declared.
                                   properties:
                                     container:
                                       description: |-
-                                        Container names the profile-declared container (init container or
-                                        sidecar) this entry patches, in the named component's rendered
-                                        template.
+                                        Container names this entry's target container — role-declared or
+                                        profile-declared (init container or sidecar) — in the named
+                                        component's rendered template.
                                       maxLength: 63
                                       minLength: 1
                                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
@@ -57824,7 +57827,7 @@ spec:
                                 description: |-
                                   Containers appends role-provided env/args to profile-provided
                                   containers, applied within the reference's component scope before
-                                  containerPatches.
+                                  containerPatches — pod-level append and this merge are interleaved...
                                 items:
                                   description: A single application container that
                                     you want to run within a pod.
@@ -74699,8 +74702,8 @@ spec:
                               items:
                                 description: |-
                                   EngineRuntime references one ClusterEngineRuntimeProfile and carries the
-                                  role's targeting decisions for the profile's two delivery dimensions: the
-                                  pod-level fragments (initContainers, containers,...
+                                  role's targeting decisions: where the profile's pod-level fragments
+                                  (initContainers, containers, volumes) apply, consent for...
                                 properties:
                                   component:
                                     description: |-
@@ -74713,18 +74716,19 @@ spec:
                                     type: string
                                   containerPatches:
                                     description: |-
-                                      ContainerPatches expresses the role's patches into the profile's
-                                      containers — the direction opposite to patchContainers.
+                                      ContainerPatches expresses the role's own patches into the
+                                      reference's component — the direction opposite to patchContainers.
                                     items:
                                       description: |-
                                         EngineRuntimeContainerPatch is one ordered role-side operation applied to
-                                        one profile-declared container at render time.
+                                        one container of the reference's component at render time — the target is
+                                        role-declared or profile-declared.
                                       properties:
                                         container:
                                           description: |-
-                                            Container names the profile-declared container (init container or
-                                            sidecar) this entry patches, in the named component's rendered
-                                            template.
+                                            Container names this entry's target container — role-declared or
+                                            profile-declared (init container or sidecar) — in the named
+                                            component's rendered template.
                                           maxLength: 63
                                           minLength: 1
                                           pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
@@ -74787,7 +74791,7 @@ spec:
                                     description: |-
                                       Containers appends role-provided env/args to profile-provided
                                       containers, applied within the reference's component scope before
-                                      containerPatches.
+                                      containerPatches — pod-level append and this merge are interleaved...
                                     items:
                                       description: A single application container
                                         that you want to run within a pod.
