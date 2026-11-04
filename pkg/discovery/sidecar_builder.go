@@ -21,138 +21,80 @@ import (
 	"fmt"
 
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	workloadsv1alpha2 "sigs.k8s.io/rbgs/api/workloads/v1alpha2"
-	"sigs.k8s.io/rbgs/pkg/utils"
 )
 
-type SidecarBuilder struct {
-	rbg    *workloadsv1alpha2.RoleBasedGroup
-	role   *workloadsv1alpha2.RoleSpec
-	client client.Client
-}
-
-func NewSidecarBuilder(
-	k8sClient client.Client, rbg *workloadsv1alpha2.RoleBasedGroup, role *workloadsv1alpha2.RoleSpec,
-) *SidecarBuilder {
-	return &SidecarBuilder{
-		rbg:    rbg,
-		role:   role,
-		client: k8sClient,
-	}
-}
-
-func (b *SidecarBuilder) Build(ctx context.Context, podSpec *v1.PodTemplateSpec) error {
+// InjectEngineRuntimeFragments merges the referenced profiles' pod-level
+// fragments into one position's rendered pod spec, in reference order:
+// initContainers, containers (sidecars) and volumes append-if-missing
+// (name-keyed, therefore idempotent), then the role-side Containers override
+// appends env/args to profile-provided containers. Fragment application
+// cannot fail: the resolver has already fetched and validated the profiles,
+// so overlapping fragment delivery and unknown override names are no-ops.
+func InjectEngineRuntimeFragments(
+	ctx context.Context, podSpec *v1.PodTemplateSpec, fragments []EngineRuntimeFragment,
+) {
 	logger := log.FromContext(ctx)
-
-	curRole, err := b.rbg.GetRole(b.role.Name)
-	if err != nil || curRole == nil {
-		return err
-	}
-
-	if len(curRole.EngineRuntimes) == 0 {
-		logger.V(1).Info("runtime is nil, skip inject sidecar")
-		return nil
-	}
-
-	for _, runtime := range curRole.EngineRuntimes {
-		if err := b.injectRuntime(ctx, podSpec, runtime); err != nil {
-			return fmt.Errorf("reconcile engine runtime %s, error: %s", runtime.ProfileName, err.Error())
+	for _, fragment := range fragments {
+		profileContainerNames := make(
+			map[string]struct{},
+			len(fragment.Profile.Spec.InitContainers)+len(fragment.Profile.Spec.Containers),
+		)
+		for _, initContainer := range fragment.Profile.Spec.InitContainers {
+			profileContainerNames[initContainer.Name] = struct{}{}
+			if !hasNamedContainer(podSpec.Spec.InitContainers, initContainer.Name) {
+				podSpec.Spec.InitContainers = append(podSpec.Spec.InitContainers, initContainer)
+			}
+		}
+		for _, container := range fragment.Profile.Spec.Containers {
+			profileContainerNames[container.Name] = struct{}{}
+			if !hasNamedContainer(podSpec.Spec.Containers, container.Name) {
+				podSpec.Spec.Containers = append(podSpec.Spec.Containers, container)
+			}
+		}
+		for _, vol := range fragment.Profile.Spec.Volumes {
+			if !hasNamedVolume(podSpec.Spec.Volumes, vol.Name) {
+				podSpec.Spec.Volumes = append(podSpec.Spec.Volumes, vol)
+			}
+		}
+		// override containers based on the role-side runtime entry
+		for _, container := range fragment.Runtime.Containers {
+			if _, owned := profileContainerNames[container.Name]; !owned {
+				logger.V(1).Info(fmt.Sprintf(
+					"rbg runtime has container %s but not in clusterEngineRuntime, skip override",
+					container.Name,
+				))
+				continue
+			}
+			for i, c := range podSpec.Spec.Containers {
+				if c.Name == container.Name {
+					if len(container.Env) > 0 {
+						podSpec.Spec.Containers[i].Env = append(podSpec.Spec.Containers[i].Env, container.Env...)
+					}
+					if len(container.Args) > 0 {
+						podSpec.Spec.Containers[i].Args = append(podSpec.Spec.Containers[i].Args, container.Args...)
+					}
+					break
+				}
+			}
 		}
 	}
-
-	return nil
 }
 
-func (b *SidecarBuilder) injectRuntime(
-	ctx context.Context, podSpec *v1.PodTemplateSpec,
-	runtime workloadsv1alpha2.EngineRuntime,
-) error {
-	logger := log.FromContext(ctx)
-
-	// ClusterEngineRuntimeProfile is now in v1alpha2
-	engineRuntime := &workloadsv1alpha2.ClusterEngineRuntimeProfile{}
-	if err := b.client.Get(
-		ctx, types.NamespacedName{
-			Name: runtime.ProfileName,
-		}, engineRuntime,
-	); err != nil {
-		return fmt.Errorf("get engine runtime %s, error: %s", runtime.ProfileName, err.Error())
-	}
-
-	engineRuntimeContainerNames := make([]string, 0)
-
-	// inject initContainers
-	for _, initContainer := range engineRuntime.Spec.InitContainers {
-		engineRuntimeContainerNames = append(engineRuntimeContainerNames, initContainer.Name)
-		found := false
-		for _, ic := range podSpec.Spec.InitContainers {
-			if ic.Name == initContainer.Name {
-				found = true
-				break
-			}
-		}
-		if !found {
-			podSpec.Spec.InitContainers = append(podSpec.Spec.InitContainers, initContainer)
+func hasNamedContainer(containers []v1.Container, name string) bool {
+	for _, c := range containers {
+		if c.Name == name {
+			return true
 		}
 	}
+	return false
+}
 
-	// inject containers
-	for _, container := range engineRuntime.Spec.Containers {
-		engineRuntimeContainerNames = append(engineRuntimeContainerNames, container.Name)
-		found := false
-		for _, c := range podSpec.Spec.Containers {
-			if c.Name == container.Name {
-				found = true
-				break
-			}
-		}
-		if !found {
-			podSpec.Spec.Containers = append(podSpec.Spec.Containers, container)
+func hasNamedVolume(volumes []v1.Volume, name string) bool {
+	for _, vol := range volumes {
+		if vol.Name == name {
+			return true
 		}
 	}
-
-	// inject volumes
-	for _, vol := range engineRuntime.Spec.Volumes {
-		found := false
-		for _, oldV := range podSpec.Spec.Volumes {
-			if oldV.Name == vol.Name {
-				found = true
-				break
-			}
-		}
-		if !found {
-			podSpec.Spec.Volumes = append(podSpec.Spec.Volumes, vol)
-		}
-	}
-
-	// override container based on rbg cr
-	for _, container := range runtime.Containers {
-
-		if !utils.ContainsString(engineRuntimeContainerNames, container.Name) {
-			logger.V(1).Info(
-				fmt.Sprintf(
-					"rbg runtime has container %s but not in clusterEngineRuntime, "+
-						"skip override", container.Name,
-				),
-			)
-			continue
-		}
-
-		for i, c := range podSpec.Spec.Containers {
-			if c.Name == container.Name {
-				if len(container.Env) > 0 {
-					podSpec.Spec.Containers[i].Env = append(podSpec.Spec.Containers[i].Env, container.Env...)
-				}
-				if len(container.Args) > 0 {
-					podSpec.Spec.Containers[i].Args = append(podSpec.Spec.Containers[i].Args, container.Args...)
-				}
-				break
-			}
-		}
-	}
-
-	return nil
+	return false
 }

@@ -681,6 +681,12 @@ func (r *RoleBasedGroupReconciler) getOrCreateWorkloadReconciler(
 		setter.SetGangScheduler(r.gangScheduler)
 	}
 
+	// Inject the event recorder if the reconciler supports it (RecorderSetter),
+	// for render-time warning events (unaimed container patches, render errors).
+	if rs, ok := rec.(reconciler.RecorderSetter); ok {
+		rs.SetRecorder(r.recorder)
+	}
+
 	// Cache the reconciler
 	r.workloadReconciler[workloadType] = rec
 	return rec, nil

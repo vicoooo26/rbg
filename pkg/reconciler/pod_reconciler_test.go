@@ -18,16 +18,19 @@ package reconciler
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/rbgs/api/workloads/constants"
 	workloadsv1alpha2 "sigs.k8s.io/rbgs/api/workloads/v1alpha2"
+	"sigs.k8s.io/rbgs/pkg/discovery"
 	wrappersv2 "sigs.k8s.io/rbgs/test/wrappers/v1alpha2"
 )
 
@@ -507,7 +510,7 @@ func TestPodReconciler_SetInjectors(t *testing.T) {
 	client := fake.NewClientBuilder().WithScheme(scheme).Build()
 	reconciler := NewPodReconciler(scheme, client)
 
-	injectors := []string{"config", "sidecar"}
+	injectors := []string{configInjector, commonEnvInjector}
 	reconciler.SetInjectors(injectors)
 
 	assert.Equal(t, injectors, reconciler.injectObjects)
@@ -637,21 +640,45 @@ func TestPodReconciler_ConstructPodTemplateSpecApplyConfiguration_WithInjectors(
 	)
 
 	t.Run(
-		"with sidecar injector enabled", func(t *testing.T) {
-			reconciler.SetInjectors([]string{"sidecar"})
+		"with an engine runtime plan set", func(t *testing.T) {
+			reconciler := NewPodReconciler(scheme, client)
+			reconciler.SetInjectors([]string{configInjector})
+			reconciler.SetEngineRuntimePlan(discovery.StandalonePositionName, &discovery.EngineRuntimePlan{
+				FragmentApplications: map[string][]discovery.EngineRuntimeFragment{
+					discovery.StandalonePositionName: {{
+						Profile: &workloadsv1alpha2.ClusterEngineRuntimeProfile{
+							ObjectMeta: metav1.ObjectMeta{Name: "rt"},
+							Spec: workloadsv1alpha2.ClusterEngineRuntimeProfileSpec{
+								Volumes: []corev1.Volume{{Name: "rt-vol", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+							},
+						},
+					}},
+				},
+			})
 
 			result, err := reconciler.ConstructPodTemplateSpecApplyConfiguration(
-				context.Background(),
-				rbg,
-				role,
-				map[string]string{"test": "label"},
+				context.Background(), rbg, role, map[string]string{"test": "label"},
 			)
-
-			// Note: Since we're using a fake client without actual sidecar configurations,
-			// the injector might not do anything, but we're mainly testing that
-			// the code path executes without panicking
 			assert.NoError(t, err)
 			assert.NotNil(t, result)
+			volumeFound := false
+			for _, vol := range result.Spec.Volumes {
+				if vol.Name != nil && *vol.Name == "rt-vol" {
+					volumeFound = true
+				}
+			}
+			assert.True(t, volumeFound, "expected the profile volume in the rendered template")
+		},
+	)
+
+	t.Run(
+		"with a plan set but no position", func(t *testing.T) {
+			reconciler := NewPodReconciler(scheme, client)
+			reconciler.SetEngineRuntimePlan("", &discovery.EngineRuntimePlan{})
+			_, err := reconciler.ConstructPodTemplateSpecApplyConfiguration(
+				context.Background(), rbg, role, map[string]string{"test": "label"},
+			)
+			assert.Error(t, err)
 		},
 	)
 
@@ -673,6 +700,109 @@ func TestPodReconciler_ConstructPodTemplateSpecApplyConfiguration_WithInjectors(
 			assert.NotNil(t, result)
 		},
 	)
+}
+
+// TestPodReconciler_EngineRuntimePositionVocabularyGuard pins the
+// fail-loud position guard: the resolver keys the plan by the role pattern's
+// position vocabulary, while some construct paths hardcode their position
+// regardless of the pattern. A position outside the plan's vocabulary means
+// a pattern/workload-type mismatch that would otherwise silently drop all
+// engine runtime content — the render must error instead. The guard is
+// silent for every legitimate shape: RIS leader/worker and component
+// positions, and the standalone sentinel for deploy/sts and RIS standalone.
+func TestPodReconciler_EngineRuntimePositionVocabularyGuard(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = workloadsv1alpha2.AddToScheme(scheme)
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	rbg := wrappersv2.BuildBasicRoleBasedGroup("guard-rbg", "default").Obj()
+	role := &rbg.Spec.Roles[0]
+
+	// render runs one render pass with the given plan wired for position.
+	// Injectors are disabled so the assertion observes only the guard.
+	render := func(t *testing.T, position string, plan *discovery.EngineRuntimePlan) error {
+		t.Helper()
+		reconciler := NewPodReconciler(scheme, client)
+		reconciler.SetInjectors([]string{})
+		reconciler.SetEngineRuntimePlan(position, plan)
+		_, err := reconciler.ConstructPodTemplateSpecApplyConfiguration(
+			context.Background(), rbg, role, nil,
+		)
+		return err
+	}
+
+	fragmentVolume := func(position string) map[string][]discovery.EngineRuntimeFragment {
+		return map[string][]discovery.EngineRuntimeFragment{position: {{
+			Profile: &workloadsv1alpha2.ClusterEngineRuntimeProfile{
+				ObjectMeta: metav1.ObjectMeta{Name: "rt"},
+				Spec: workloadsv1alpha2.ClusterEngineRuntimeProfileSpec{
+					Volumes: []corev1.Volume{{Name: "rt-vol", VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					}}},
+				},
+			},
+		}}}
+	}
+
+	t.Run("guard fires when the position is outside the plan's vocabulary", func(t *testing.T) {
+		// a leaderWorker plan rendered through a construct path that asks for
+		// the standalone sentinel (the deprecated deploy/sts shape)
+		plan := &discovery.EngineRuntimePlan{
+			Vocabulary: []string{
+				string(constants.LeaderComponentType), string(constants.WorkerComponentType),
+			},
+			FragmentApplications: fragmentVolume(string(constants.LeaderComponentType)),
+		}
+		err := render(t, discovery.StandalonePositionName, plan)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), fmt.Sprintf("%q", discovery.StandalonePositionName))
+		assert.Contains(t, err.Error(), "not defined by role")
+		assert.Contains(t, err.Error(),
+			fmt.Sprintf("[%s %s]", constants.LeaderComponentType, constants.WorkerComponentType))
+	})
+
+	t.Run("guard is silent for a leaderWorker plan asked for leader", func(t *testing.T) {
+		plan := &discovery.EngineRuntimePlan{
+			Vocabulary: []string{
+				string(constants.LeaderComponentType), string(constants.WorkerComponentType),
+			},
+			FragmentApplications: fragmentVolume(string(constants.LeaderComponentType)),
+		}
+		require.NoError(t, render(t, string(constants.LeaderComponentType), plan))
+	})
+
+	t.Run("guard is silent for a leaderWorker plan asked for worker", func(t *testing.T) {
+		plan := &discovery.EngineRuntimePlan{
+			Vocabulary: []string{
+				string(constants.LeaderComponentType), string(constants.WorkerComponentType),
+			},
+			FragmentApplications: fragmentVolume(string(constants.WorkerComponentType)),
+		}
+		require.NoError(t, render(t, string(constants.WorkerComponentType), plan))
+	})
+
+	t.Run("guard is silent for a customComponents plan asked for a component name", func(t *testing.T) {
+		plan := &discovery.EngineRuntimePlan{
+			Vocabulary:           []string{"engine-comp", "aux-comp"},
+			FragmentApplications: fragmentVolume("engine-comp"),
+		}
+		require.NoError(t, render(t, "engine-comp", plan))
+	})
+
+	t.Run("guard is silent for a standalone plan asked for the sentinel", func(t *testing.T) {
+		plan := &discovery.EngineRuntimePlan{
+			Vocabulary:           []string{discovery.StandalonePositionName},
+			FragmentApplications: fragmentVolume(discovery.StandalonePositionName),
+		}
+		require.NoError(t, render(t, discovery.StandalonePositionName, plan))
+	})
+
+	t.Run("guard is silent for a plan with no engine runtime content", func(t *testing.T) {
+		// a role referencing no engine runtimes resolves to an empty plan with
+		// no vocabulary: nothing is routed, so nothing can be mis-keyed
+		require.NoError(t, render(t, discovery.StandalonePositionName, &discovery.EngineRuntimePlan{}))
+	})
 }
 
 func Test_setExclusiveAffinities(t *testing.T) {

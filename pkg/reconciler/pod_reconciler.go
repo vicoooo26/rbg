@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	coreapplyv1 "k8s.io/client-go/applyconfigurations/core/v1"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/rbgs/api/workloads/constants"
@@ -40,7 +41,6 @@ import (
 
 const (
 	configInjector    = "config"
-	sidecarInjector   = "sidecar"
 	commonEnvInjector = "common_env"
 	lwpEnvInjector    = "lwp_env"
 )
@@ -50,6 +50,13 @@ type PodReconciler struct {
 	client        client.Client
 	injectObjects []string
 	gangScheduler scheduler.GangScheduler
+	recorder      record.EventRecorder
+	// engineRuntimePlan is the role-level resolver output; engineRuntimePosition
+	// names which template this reconciler renders ("leader", "worker", a
+	// component name, or the standalone sentinel). Both are set together;
+	// a nil plan means the role renders no engine runtimes.
+	engineRuntimePosition string
+	engineRuntimePlan     *discovery.EngineRuntimePlan
 }
 
 func NewPodReconciler(scheme *runtime.Scheme, client client.Client) *PodReconciler {
@@ -67,6 +74,20 @@ func (r *PodReconciler) SetInjectors(injectObjects []string) {
 // labels/annotations into pod templates.
 func (r *PodReconciler) SetGangScheduler(m scheduler.GangScheduler) {
 	r.gangScheduler = m
+}
+
+// SetRecorder configures the event recorder used to emit render-time warning
+// events (engine runtime render failures). Nil means no events.
+func (r *PodReconciler) SetRecorder(recorder record.EventRecorder) {
+	r.recorder = recorder
+}
+
+// SetEngineRuntimePlan wires the per-role resolver output for the one
+// position's template this reconciler renders. Call it before
+// ConstructPodTemplateSpecApplyConfiguration.
+func (r *PodReconciler) SetEngineRuntimePlan(position string, plan *discovery.EngineRuntimePlan) {
+	r.engineRuntimePosition = position
+	r.engineRuntimePlan = plan
 }
 
 func (r *PodReconciler) ConstructPodTemplateSpecApplyConfiguration(
@@ -94,17 +115,74 @@ func (r *PodReconciler) ConstructPodTemplateSpecApplyConfiguration(
 	// inject objects
 	injector := discovery.NewDefaultInjector(r.scheme, r.client)
 	if r.injectObjects == nil {
-		r.injectObjects = []string{configInjector, sidecarInjector, commonEnvInjector}
+		r.injectObjects = []string{configInjector, commonEnvInjector}
 	}
 	if utils.ContainsString(r.injectObjects, configInjector) {
 		if err := injector.InjectConfig(ctx, &podTemplateSpec, rbg, role); err != nil {
 			return nil, fmt.Errorf("failed to inject config: %w", err)
 		}
 	}
-	if utils.ContainsString(r.injectObjects, sidecarInjector) {
-		// The sidecar containers also need rbg-related envs, so inject them first
-		if err := injector.InjectSidecar(ctx, &podTemplateSpec, rbg, role); err != nil {
-			return nil, fmt.Errorf("failed to inject sidecar: %w", err)
+	if r.engineRuntimePlan != nil {
+		if r.engineRuntimePosition == "" {
+			return nil, fmt.Errorf("engine runtime plan is set but the template's position is not")
+		}
+		if !r.engineRuntimePlan.HasPosition(r.engineRuntimePosition) {
+			// The resolver keys the plan by the role pattern's position
+			// vocabulary; a position outside it means the role's pattern and
+			// the rendered workload type do not match. Rendering would
+			// silently drop all engine runtime content — fail loudly instead.
+			err := fmt.Errorf(
+				"engine runtime position %q is not defined by role %q's pattern (its positions are %v): "+
+					"the pattern and the rendered workload type do not match, and rendering would "+
+					"silently drop the role's engine runtime content",
+				r.engineRuntimePosition, role.Name, r.engineRuntimePlan.Vocabulary,
+			)
+			if r.recorder != nil {
+				r.recorder.Event(rbg, corev1.EventTypeWarning, discovery.ReasonEngineRuntimeRenderFailed,
+					fmt.Sprintf("engine runtime render failed: %s", err.Error()))
+			}
+			return nil, err
+		}
+		// The role's own container names, captured before any injection,
+		// are the sole targeting boundary for profile-side container
+		// patches (profile-injected containers and role-declared
+		// initContainers are never addressable). The role-declared init
+		// container names join them only for the role-side pass's
+		// ownership check.
+		roleContainerNames := make(map[string]struct{}, len(podTemplateSpec.Spec.Containers))
+		for _, c := range podTemplateSpec.Spec.Containers {
+			roleContainerNames[c.Name] = struct{}{}
+		}
+		roleInitContainerNames := make(map[string]struct{}, len(podTemplateSpec.Spec.InitContainers))
+		for _, c := range podTemplateSpec.Spec.InitContainers {
+			roleInitContainerNames[c.Name] = struct{}{}
+		}
+		discovery.InjectEngineRuntimeFragments(
+			ctx, &podTemplateSpec,
+			r.engineRuntimePlan.FragmentApplications[r.engineRuntimePosition],
+		)
+		// KEP-531 application order: role-side containerPatches apply after the
+		// fragment/legacy-merge pass and before the profile-side pass.
+		if err := discovery.ApplyRoleEngineRuntimePatches(
+			ctx, &podTemplateSpec, roleContainerNames, roleInitContainerNames,
+			r.engineRuntimePlan.RolePatchApplications[r.engineRuntimePosition],
+			r.engineRuntimePlan.RoleName,
+		); err != nil {
+			if r.recorder != nil {
+				r.recorder.Event(rbg, corev1.EventTypeWarning, discovery.ReasonEngineRuntimeRenderFailed,
+					fmt.Sprintf("engine runtime render failed: %s", err.Error()))
+			}
+			return nil, fmt.Errorf("failed to apply role engine runtime patches: %w", err)
+		}
+		if err := discovery.ApplyEngineRuntimePatches(
+			ctx, &podTemplateSpec, roleContainerNames,
+			r.engineRuntimePlan.PatchApplications[r.engineRuntimePosition],
+		); err != nil {
+			if r.recorder != nil {
+				r.recorder.Event(rbg, corev1.EventTypeWarning, discovery.ReasonEngineRuntimeRenderFailed,
+					fmt.Sprintf("engine runtime render failed: %s", err.Error()))
+			}
+			return nil, fmt.Errorf("failed to apply engine runtime patches: %w", err)
 		}
 	}
 	if utils.ContainsString(r.injectObjects, commonEnvInjector) {
