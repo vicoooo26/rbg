@@ -18,6 +18,7 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -491,6 +492,23 @@ func TestResolveEngineRuntimes(t *testing.T) {
 		assert.Nil(t, plan.PatchApplications[leader])
 		assert.True(t, hasEventContaining(t, recorder, ReasonEngineRuntimeRenderFailed))
 	})
+}
+
+// TestIsRenderError pins the render-error marking the RBG controller relies on
+// to surface engine runtime render failures as status conditions: a resolver
+// failure is detectable through the wrapping and joining the reconcile loop
+// adds on its way up, while a non-render error is not.
+func TestIsRenderError(t *testing.T) {
+	_, resolverErr, _ := resolverHarness(t, nil, leaderWorkerRole([]workloadsv1alpha2.EngineRuntime{{ProfileName: "ghost"}}))
+	require.Error(t, resolverErr)
+	require.True(t, IsRenderError(resolverErr))
+	// The shape the controller sees: wrapped by fmt.Errorf and joined with
+	// other errors.
+	assert.True(t, IsRenderError(fmt.Errorf("reconcile roles: %w", resolverErr)))
+	assert.True(t, IsRenderError(errors.Join(errors.New("unrelated"), resolverErr)))
+	// Non-render errors must not trip the detection.
+	assert.False(t, IsRenderError(errors.New("failed to inject config")))
+	assert.False(t, IsRenderError(nil))
 }
 
 // TestResolveEngineRuntimesVocabulary pins the render vocabulary the resolver

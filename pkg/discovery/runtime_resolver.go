@@ -253,7 +253,8 @@ func ResolveEngineRuntimes(
 }
 
 // failRef emits the render-failed warning for a reference-scoped error and
-// returns the error unchanged.
+// returns the error marked as a render failure (same message) so the RBG
+// controller can surface it as a status condition.
 func failRef(
 	ctx context.Context,
 	recorder record.EventRecorder,
@@ -263,7 +264,7 @@ func failRef(
 ) error {
 	emitEngineRuntimeWarning(ctx, recorder, rbg, ReasonEngineRuntimeRenderFailed,
 		fmt.Sprintf("engine runtime %q render failed: %s", runtime.ProfileName, err.Error()))
-	return err
+	return NewRenderError(err)
 }
 
 // effectivePositions computes a reference's effective position set: the

@@ -53,6 +53,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/rbgs/pkg/discovery"
 	"sigs.k8s.io/rbgs/pkg/reconciler"
 	"sigs.k8s.io/rbgs/pkg/scheduler/common"
 
@@ -2490,6 +2491,103 @@ func TestReconcileIncompatibleGangConfig(t *testing.T) {
 	require.Error(t, err)
 	assert.Zero(t, result.RequeueAfter)
 	assert.Contains(t, drainEvents(), "Warning FailedReconcilePodGroup podgroup apiserver hiccup")
+}
+
+// TestReconcileEngineRuntimeRenderedCondition pins the KEP-531 validation layer
+// split for engine runtime render failures: the RBG gains an EngineRuntimeRendered
+// condition alongside the existing warning events, the condition carries the
+// attributed render error, it turns True once the render succeeds again, and it is
+// removed when the RBG no longer references any engine runtime.
+func TestReconcileEngineRuntimeRenderedCondition(t *testing.T) {
+	testScheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(testScheme))
+	require.NoError(t, workloadsv1alpha2.AddToScheme(testScheme))
+
+	rbg := wrappersv2.BuildBasicRoleBasedGroup("test-rbg", "default").Obj()
+	rbg.Spec.Roles[0].EngineRuntimes = []workloadsv1alpha2.EngineRuntime{
+		{ProfileName: "test-profile"},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithObjects(rbg).
+		WithStatusSubresource(&workloadsv1alpha2.RoleBasedGroup{}).
+		Build()
+	recorder := record.NewFakeRecorder(100)
+
+	r := &RoleBasedGroupReconciler{
+		client:             fakeClient,
+		apiReader:          fakeClient,
+		scheme:             testScheme,
+		recorder:           recorder,
+		workloadReconciler: make(map[string]reconciler.WorkloadReconciler),
+		gangScheduler:      &stubGangScheduler{},
+	}
+	ctx := ctrl.LoggerInto(context.TODO(), zap.New().WithValues("env", "unit-test"))
+	request := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-rbg", Namespace: "default"}}
+
+	rendered := func() *metav1.Condition {
+		got := &workloadsv1alpha2.RoleBasedGroup{}
+		require.NoError(t, fakeClient.Get(ctx, request.NamespacedName, got))
+		return apimeta.FindStatusCondition(
+			got.Status.Conditions, string(workloadsv1alpha2.RoleBasedGroupEngineRuntimeRendered))
+	}
+	drainEvents := func() []string {
+		var events []string
+		for {
+			select {
+			case e := <-recorder.Events:
+				events = append(events, e)
+			default:
+				return events
+			}
+		}
+	}
+	hasEventContaining := func(substr string) bool {
+		for _, e := range drainEvents() {
+			if strings.Contains(e, substr) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// The referenced profile does not exist: the render fails, the reconcile
+	// requeues on the returned error, and the failure is recorded as a
+	// condition in addition to the warning event.
+	_, err := r.Reconcile(ctx, request)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "test-profile")
+	condition := rendered()
+	require.NotNil(t, condition, "expected the EngineRuntimeRendered condition on render failure")
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Equal(t, discovery.ReasonEngineRuntimeRenderFailed, condition.Reason)
+	assert.Contains(t, condition.Message, "test-profile")
+	assert.True(t, hasEventContaining("Warning EngineRuntimeRenderFailed"),
+		"expected the render-failed warning event to keep firing alongside the condition")
+
+	// The profile appears: the render succeeds and the condition turns True.
+	profile := &workloadsv1alpha2.ClusterEngineRuntimeProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-profile"},
+	}
+	require.NoError(t, fakeClient.Create(ctx, profile))
+	_, err = r.Reconcile(ctx, request)
+	require.NoError(t, err)
+	condition = rendered()
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionTrue, condition.Status)
+	assert.False(t, hasEventContaining("Warning EngineRuntimeRenderFailed"),
+		"no render-failed event after a successful render")
+
+	// Dropping the reference removes the condition: a leftover one would keep
+	// claiming the RBG renders engine runtime content it no longer declares.
+	current := &workloadsv1alpha2.RoleBasedGroup{}
+	require.NoError(t, fakeClient.Get(ctx, request.NamespacedName, current))
+	current.Spec.Roles[0].EngineRuntimes = nil
+	require.NoError(t, fakeClient.Update(ctx, current))
+	_, err = r.Reconcile(ctx, request)
+	require.NoError(t, err)
+	assert.Nil(t, rendered())
 }
 
 // OrderScheduled must wait for every Pod in the current replica batch, including

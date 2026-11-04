@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -45,6 +46,36 @@ const (
 	// shadowing is never silent.
 	ReasonEngineRuntimePositionalShadowing = "EngineRuntimePositionalShadowing"
 )
+
+// RenderError marks an engine runtime render failure (resolver or render-pass
+// error). The RBG controller detects it with IsRenderError where the error
+// lands in its reconcile loop and surfaces it as the RoleBasedGroup
+// EngineRuntimeRendered condition; the events still fire at the failure site.
+// Wrapping preserves the underlying error's message and unwrap chain, so
+// error strings and errors.Is/As behavior are unchanged.
+type RenderError struct {
+	err error
+}
+
+// NewRenderError wraps err as an engine runtime render failure. A nil err
+// returns nil so callers can wrap unconditionally.
+func NewRenderError(err error) *RenderError {
+	if err == nil {
+		return nil
+	}
+	return &RenderError{err: err}
+}
+
+func (e *RenderError) Error() string { return e.err.Error() }
+
+func (e *RenderError) Unwrap() error { return e.err }
+
+// IsRenderError reports whether err — or any error it wraps or joins — is an
+// engine runtime render failure.
+func IsRenderError(err error) bool {
+	var renderErr *RenderError
+	return errors.As(err, &renderErr)
+}
 
 // positionalInsertRecorder accumulates the container names that took a
 // positional insert (a numeric-index, non-"-" element pointer) during one

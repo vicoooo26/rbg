@@ -275,6 +275,22 @@ func (r *RoleBasedGroupReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// Step 8: Reconcile roles, do create/update actions for roles.
 	if err := r.reconcileRoles(ctx, rbg, expectedRolesRevisionHash, scalingTargets, rollingUpdateStrategies); err != nil {
+		// KEP-531 validation layer split: render errors surface as RBG
+		// conditions plus events. The events fire at the failure site (the
+		// resolver and the render passes, via the injected recorder); the
+		// condition is recorded here, where the error lands in the reconcile
+		// loop and RBG status write access exists. Non-render errors leave the
+		// condition untouched — their message would misattribute the failure —
+		// and a render-fixed RBG whose reconcile fails later keeps its stale
+		// condition until the next successful reconcile corrects it.
+		if discovery.IsRenderError(err) {
+			if condErr := r.setEngineRuntimeRenderedCondition(ctx, rbg, err); condErr != nil {
+				return ctrl.Result{}, stderrors.Join(err, condErr)
+			}
+		}
+		return ctrl.Result{}, err
+	}
+	if err := r.setEngineRuntimeRenderedCondition(ctx, rbg, nil); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -895,6 +911,69 @@ func (r *RoleBasedGroupReconciler) setGangConfiguredCondition(
 		r.recorder.Event(rbg, corev1.EventTypeWarning, IncompatibleGangConfig, cause.Error())
 	}
 	return nil
+}
+
+// setEngineRuntimeRenderedCondition records the outcome of the engine runtime
+// render on the RBG (KEP-531 validation layer split: render errors surface as
+// conditions plus events). cause is the attributed render error, or nil after
+// a successful render. It mirrors setGangConfiguredCondition: the condition is
+// the durable surface, patched only when it changes, and absent when the RBG
+// references no engine runtimes. It emits no events — the render helpers emit
+// theirs at the failure site, unchanged.
+func (r *RoleBasedGroupReconciler) setEngineRuntimeRenderedCondition(
+	ctx context.Context,
+	rbg *workloadsv1alpha2.RoleBasedGroup,
+	cause error,
+) error {
+	conditionType := string(workloadsv1alpha2.RoleBasedGroupEngineRuntimeRendered)
+
+	// No role references engine runtimes; a stale condition would be misleading.
+	if !referencesEngineRuntimes(rbg) {
+		if !apimeta.RemoveStatusCondition(&rbg.Status.Conditions, conditionType) {
+			return nil
+		}
+		return utils.PatchObjectApplyConfiguration(
+			ctx, r.client, toRBGApplyConfigurationForStatus(rbg), utils.PatchStatus)
+	}
+
+	var changed bool
+	switch {
+	case cause != nil:
+		changed = apimeta.SetStatusCondition(&rbg.Status.Conditions, metav1.Condition{
+			Type:               conditionType,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.Now(),
+			Reason:             discovery.ReasonEngineRuntimeRenderFailed,
+			Message:            cause.Error(),
+			ObservedGeneration: rbg.Generation,
+		})
+	default:
+		changed = apimeta.SetStatusCondition(&rbg.Status.Conditions, metav1.Condition{
+			Type:               conditionType,
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "EngineRuntimeRendered",
+			Message:            "All engine runtime content rendered",
+			ObservedGeneration: rbg.Generation,
+		})
+	}
+	if !changed {
+		return nil
+	}
+
+	return utils.PatchObjectApplyConfiguration(
+		ctx, r.client, toRBGApplyConfigurationForStatus(rbg), utils.PatchStatus)
+}
+
+// referencesEngineRuntimes reports whether any role of the RBG references an
+// engine runtime profile.
+func referencesEngineRuntimes(rbg *workloadsv1alpha2.RoleBasedGroup) bool {
+	for i := range rbg.Spec.Roles {
+		if len(rbg.Spec.Roles[i].EngineRuntimes) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func toRBGApplyConfigurationForStatus(rbg *workloadsv1alpha2.RoleBasedGroup) *applyconfiguration.RoleBasedGroupApplyConfiguration {

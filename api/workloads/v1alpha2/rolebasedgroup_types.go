@@ -681,6 +681,12 @@ const (
 	// for this rbg can be satisfied by the current roles and scheduler. The condition
 	// is absent when gang scheduling is disabled.
 	RoleBasedGroupGangConfigured RoleBasedGroupConditionType = "GangConfigured"
+
+	// RoleBasedGroupEngineRuntimeRendered means the engine runtime content of the
+	// rbg's roles rendered successfully. When False, the message carries the
+	// attributed render error (owning side and index). The condition is absent
+	// when no role references engine runtimes.
+	RoleBasedGroupEngineRuntimeRendered RoleBasedGroupConditionType = "EngineRuntimeRendered"
 )
 
 // +kubebuilder:object:root=true

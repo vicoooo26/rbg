@@ -158,7 +158,7 @@ func (r *PodReconciler) ConstructPodTemplateSpecApplyConfiguration(
 				r.recorder.Event(rbg, corev1.EventTypeWarning, discovery.ReasonEngineRuntimeRenderFailed,
 					fmt.Sprintf("engine runtime render failed: %s", err.Error()))
 			}
-			return nil, err
+			return nil, discovery.NewRenderError(err)
 		}
 		// The role-declared container names, captured before the fragment
 		// pass, are the sole targeting boundary for profile-side patches:
@@ -209,7 +209,7 @@ func (r *PodReconciler) ConstructPodTemplateSpecApplyConfiguration(
 				r.recorder.Event(rbg, corev1.EventTypeWarning, discovery.ReasonEngineRuntimeRenderFailed,
 					fmt.Sprintf("engine runtime render failed: %s", err.Error()))
 			}
-			return nil, fmt.Errorf("failed to apply engine runtime patches: %w", err)
+			return nil, discovery.NewRenderError(fmt.Errorf("failed to apply engine runtime patches: %w", err))
 		}
 		// KEP-531 application order: the role-side containerPatches pass
 		// applies last — what the role writes lands where it is written.
@@ -226,7 +226,7 @@ func (r *PodReconciler) ConstructPodTemplateSpecApplyConfiguration(
 				r.recorder.Event(rbg, corev1.EventTypeWarning, discovery.ReasonEngineRuntimeRenderFailed,
 					fmt.Sprintf("engine runtime render failed: %s", err.Error()))
 			}
-			return nil, fmt.Errorf("failed to apply role engine runtime patches: %w", err)
+			return nil, discovery.NewRenderError(fmt.Errorf("failed to apply role engine runtime patches: %w", err))
 		}
 		// KEP-531 D10, second clause: a role-side positional insert landing
 		// ahead of a profile-side one on the same container shadows it — the
