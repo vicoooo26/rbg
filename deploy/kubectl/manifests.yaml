@@ -50,6 +50,61 @@ spec:
             description: ClusterEngineRuntimeProfileSpec defines the desired state
               of ClusterEngineRuntimeProfile.
             properties:
+              containerPatches:
+                description: |-
+                  ContainerPatches applies ordered per-container modifications to the
+                  role containers named by each referencing EngineRuntime's
+                  patchContainers at render time, in list order.
+                items:
+                  description: ContainerPatch is one ordered per-container modification.
+                  properties:
+                    jsonPatch:
+                      description: |-
+                        JSONPatch carries the RFC 6902 format: `add`-only operations
+                        with container-relative paths. See ContainerJSONPatch for its
+                        grammar.
+                      properties:
+                        op:
+                          description: |-
+                            Op is the patch operation. Only `add` is accepted today;
+                            `replace` is reserved as a future enum value and rejected.
+                          enum:
+                          - add
+                          type: string
+                        path:
+                          description: |-
+                            Path is an RFC 6901 pointer relative to the rendered target
+                            container: `/command/0` prepends an argv element (head insert,
+                            so multi-element prepends are written in reverse order),
+                            `/env/0` inserts an...
+                          minLength: 1
+                          type: string
+                        value:
+                          description: |-
+                            Value is the JSON value the operation adds, in the shape of
+                            the path's element: a string for /command, /args and
+                            /securityContext/capabilities/add elements; a corev1.EnvVar
+                            object for /env; a corev1.
+                          x-kubernetes-preserve-unknown-fields: true
+                      required:
+                      - op
+                      - path
+                      - value
+                      type: object
+                      x-kubernetes-validations:
+                      - message: path must be an element pointer under /command, /args,
+                          /env, /volumeMounts or /securityContext/capabilities/add
+                        rule: self.path.startsWith('/command/') || self.path.startsWith('/args/')
+                          || self.path.startsWith('/env/') || self.path.startsWith('/volumeMounts/')
+                          || self.path.startsWith('/securityContext/capabilities/add/')
+                  type: object
+                  x-kubernetes-validations:
+                  - message: exactly one patch field must be set
+                    rule: has(self.jsonPatch)
+                maxItems: 32
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: atomic
               containers:
                 items:
                   description: A single application container that you want to run
@@ -4363,6 +4418,61 @@ spec:
             description: ClusterEngineRuntimeProfileSpec defines the desired state
               of ClusterEngineRuntimeProfile.
             properties:
+              containerPatches:
+                description: |-
+                  ContainerPatches applies ordered per-container modifications to the
+                  role containers named by each referencing EngineRuntime's
+                  patchContainers at render time, in list order.
+                items:
+                  description: ContainerPatch is one ordered per-container modification.
+                  properties:
+                    jsonPatch:
+                      description: |-
+                        JSONPatch carries the RFC 6902 format: `add`-only operations
+                        with container-relative paths. See ContainerJSONPatch for its
+                        grammar.
+                      properties:
+                        op:
+                          description: |-
+                            Op is the patch operation. Only `add` is accepted today;
+                            `replace` is reserved as a future enum value and rejected.
+                          enum:
+                          - add
+                          type: string
+                        path:
+                          description: |-
+                            Path is an RFC 6901 pointer relative to the rendered target
+                            container: `/command/0` prepends an argv element (head insert,
+                            so multi-element prepends are written in reverse order),
+                            `/env/0` inserts an...
+                          minLength: 1
+                          type: string
+                        value:
+                          description: |-
+                            Value is the JSON value the operation adds, in the shape of
+                            the path's element: a string for /command, /args and
+                            /securityContext/capabilities/add elements; a corev1.EnvVar
+                            object for /env; a corev1.
+                          x-kubernetes-preserve-unknown-fields: true
+                      required:
+                      - op
+                      - path
+                      - value
+                      type: object
+                      x-kubernetes-validations:
+                      - message: path must be an element pointer under /command, /args,
+                          /env, /volumeMounts or /securityContext/capabilities/add
+                        rule: self.path.startsWith('/command/') || self.path.startsWith('/args/')
+                          || self.path.startsWith('/env/') || self.path.startsWith('/volumeMounts/')
+                          || self.path.startsWith('/securityContext/capabilities/add/')
+                  type: object
+                  x-kubernetes-validations:
+                  - message: exactly one patch field must be set
+                    rule: has(self.jsonPatch)
+                maxItems: 32
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: atomic
               containers:
                 items:
                   description: A single application container that you want to run
@@ -16365,6 +16475,7 @@ spec:
                 - name
                 x-kubernetes-list-type: map
               roles:
+                description: Roles is the set of role specifications.
                 items:
                   description: |-
                     RoleSpec defines the specification for a role in the group
@@ -16416,10 +16527,95 @@ spec:
                       type: array
                     engineRuntimes:
                       items:
+                        description: |-
+                          EngineRuntime references one ClusterEngineRuntimeProfile and carries the
+                          role's targeting decisions for the profile's two delivery dimensions: the
+                          pod-level fragments (initContainers, containers,...
                         properties:
+                          component:
+                            description: |-
+                              Component scopes this reference to the named component of the role's
+                              pattern — `leader` or `worker` under leaderWorkerPattern, a declared
+                              component name under customComponentsPattern.
+                            maxLength: 63
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                          containerPatches:
+                            description: |-
+                              ContainerPatches expresses the role's patches into the profile's
+                              containers — the direction opposite to patchContainers.
+                            items:
+                              description: |-
+                                EngineRuntimeContainerPatch is one ordered role-side operation applied to
+                                one profile-declared container at render time.
+                              properties:
+                                container:
+                                  description: |-
+                                    Container names the profile-declared container (init container or
+                                    sidecar) this entry patches, in the named component's rendered
+                                    template.
+                                  maxLength: 63
+                                  minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                  type: string
+                                jsonPatch:
+                                  description: |-
+                                    JSONPatch carries the RFC 6902 format: `add`-only operations
+                                    with container-relative paths. See ContainerJSONPatch for its
+                                    grammar.
+                                  properties:
+                                    op:
+                                      description: |-
+                                        Op is the patch operation. Only `add` is accepted today;
+                                        `replace` is reserved as a future enum value and rejected.
+                                      enum:
+                                      - add
+                                      type: string
+                                    path:
+                                      description: |-
+                                        Path is an RFC 6901 pointer relative to the rendered target
+                                        container: `/command/0` prepends an argv element (head insert,
+                                        so multi-element prepends are written in reverse order),
+                                        `/env/0` inserts an...
+                                      minLength: 1
+                                      type: string
+                                    value:
+                                      description: |-
+                                        Value is the JSON value the operation adds, in the shape of
+                                        the path's element: a string for /command, /args and
+                                        /securityContext/capabilities/add elements; a corev1.EnvVar
+                                        object for /env; a corev1.
+                                      x-kubernetes-preserve-unknown-fields: true
+                                  required:
+                                  - op
+                                  - path
+                                  - value
+                                  type: object
+                                  x-kubernetes-validations:
+                                  - message: path must be an element pointer under
+                                      /command, /args, /env, /volumeMounts or /securityContext/capabilities/add
+                                    rule: self.path.startsWith('/command/') || self.path.startsWith('/args/')
+                                      || self.path.startsWith('/env/') || self.path.startsWith('/volumeMounts/')
+                                      || self.path.startsWith('/securityContext/capabilities/add/')
+                              required:
+                              - container
+                              type: object
+                              x-kubernetes-validations:
+                              - message: exactly one patch field must be set
+                                rule: has(self.jsonPatch)
+                            maxItems: 32
+                            minItems: 1
+                            type: array
+                            x-kubernetes-list-type: atomic
+                            x-kubernetes-validations:
+                            - message: exactly one patch field must be set
+                              rule: self.all(p, has(p.jsonPatch))
                           containers:
-                            description: Containers specifies the engine runtime containers
-                              to be overridden, only support command,args overridden
+                            description: |-
+                              Containers appends role-provided env/args to profile-provided
+                              containers, applied within the reference's component scope before
+                              containerPatches.
                             items:
                               description: A single application container that you
                                 want to run within a pod.
@@ -17783,19 +17979,42 @@ spec:
                               type: object
                             type: array
                           injectContainers:
-                            description: InjectContainers specifies the containers
-                              to be injected with the engine runtime
+                            description: |-
+                              InjectContainers predates the consent model of this API version and
+                              carries no semantics: the field is optional, its values are accepted
+                              and ignored, and nothing reads it.
                             items:
                               type: string
                             type: array
+                          patchContainers:
+                            description: |-
+                              PatchContainers consents to the profile's containerPatches. Each entry
+                              is a bare container name addressing exactly one spec.
+                            items:
+                              maxLength: 63
+                              type: string
+                            maxItems: 32
+                            minItems: 1
+                            type: array
+                            x-kubernetes-validations:
+                            - message: container names must be DNS labels
+                              rule: self.all(p, p.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'))
                           profileName:
-                            description: ProfileName specifies the name of the engine
-                              runtime profile to be used
+                            description: |-
+                              ProfileName specifies the name of the ClusterEngineRuntimeProfile
+                              applied to this role, resolved at render time.
+                            minLength: 1
                             type: string
                         required:
                         - profileName
                         type: object
+                      maxItems: 16
                       type: array
+                      x-kubernetes-validations:
+                      - message: patchContainers and containerPatches require component
+                          to be set
+                        rule: self.all(p, (!has(p.patchContainers) || has(p.component))
+                          && (!has(p.containerPatches) || has(p.component)))
                     labels:
                       additionalProperties:
                         type: string
@@ -25326,6 +25545,7 @@ spec:
                       && self.workload.kind == 'InstanceSet')
                   - message: template and templateRef are mutually exclusive
                     rule: '!(has(self.template) && has(self.templateRef))'
+                maxItems: 16
                 minItems: 1
                 type: array
                 x-kubernetes-list-map-keys:
@@ -32790,6 +33010,7 @@ spec:
                 - name
                 x-kubernetes-list-type: map
               roles:
+                description: Roles is the set of role specifications.
                 items:
                   description: RoleSpec defines the specification for a role in the
                     group
@@ -32902,10 +33123,95 @@ spec:
                       type: array
                     engineRuntimes:
                       items:
+                        description: |-
+                          EngineRuntime references one ClusterEngineRuntimeProfile and carries the
+                          role's targeting decisions for the profile's two delivery dimensions: the
+                          pod-level fragments (initContainers, containers,...
                         properties:
+                          component:
+                            description: |-
+                              Component scopes this reference to the named component of the role's
+                              pattern — `leader` or `worker` under leaderWorkerPattern, a declared
+                              component name under customComponentsPattern.
+                            maxLength: 63
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                          containerPatches:
+                            description: |-
+                              ContainerPatches expresses the role's patches into the profile's
+                              containers — the direction opposite to patchContainers.
+                            items:
+                              description: |-
+                                EngineRuntimeContainerPatch is one ordered role-side operation applied to
+                                one profile-declared container at render time.
+                              properties:
+                                container:
+                                  description: |-
+                                    Container names the profile-declared container (init container or
+                                    sidecar) this entry patches, in the named component's rendered
+                                    template.
+                                  maxLength: 63
+                                  minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                  type: string
+                                jsonPatch:
+                                  description: |-
+                                    JSONPatch carries the RFC 6902 format: `add`-only operations
+                                    with container-relative paths. See ContainerJSONPatch for its
+                                    grammar.
+                                  properties:
+                                    op:
+                                      description: |-
+                                        Op is the patch operation. Only `add` is accepted today;
+                                        `replace` is reserved as a future enum value and rejected.
+                                      enum:
+                                      - add
+                                      type: string
+                                    path:
+                                      description: |-
+                                        Path is an RFC 6901 pointer relative to the rendered target
+                                        container: `/command/0` prepends an argv element (head insert,
+                                        so multi-element prepends are written in reverse order),
+                                        `/env/0` inserts an...
+                                      minLength: 1
+                                      type: string
+                                    value:
+                                      description: |-
+                                        Value is the JSON value the operation adds, in the shape of
+                                        the path's element: a string for /command, /args and
+                                        /securityContext/capabilities/add elements; a corev1.EnvVar
+                                        object for /env; a corev1.
+                                      x-kubernetes-preserve-unknown-fields: true
+                                  required:
+                                  - op
+                                  - path
+                                  - value
+                                  type: object
+                                  x-kubernetes-validations:
+                                  - message: path must be an element pointer under
+                                      /command, /args, /env, /volumeMounts or /securityContext/capabilities/add
+                                    rule: self.path.startsWith('/command/') || self.path.startsWith('/args/')
+                                      || self.path.startsWith('/env/') || self.path.startsWith('/volumeMounts/')
+                                      || self.path.startsWith('/securityContext/capabilities/add/')
+                              required:
+                              - container
+                              type: object
+                              x-kubernetes-validations:
+                              - message: exactly one patch field must be set
+                                rule: has(self.jsonPatch)
+                            maxItems: 32
+                            minItems: 1
+                            type: array
+                            x-kubernetes-list-type: atomic
+                            x-kubernetes-validations:
+                            - message: exactly one patch field must be set
+                              rule: self.all(p, has(p.jsonPatch))
                           containers:
-                            description: Containers specifies the engine runtime containers
-                              to be overridden
+                            description: |-
+                              Containers appends role-provided env/args to profile-provided
+                              containers, applied within the reference's component scope before
+                              containerPatches.
                             items:
                               description: A single application container that you
                                 want to run within a pod.
@@ -34269,19 +34575,42 @@ spec:
                               type: object
                             type: array
                           injectContainers:
-                            description: InjectContainers specifies the containers
-                              to be injected with the engine runtime
+                            description: |-
+                              InjectContainers predates the consent model of this API version and
+                              carries no semantics: the field is optional, its values are accepted
+                              and ignored, and nothing reads it.
                             items:
                               type: string
                             type: array
+                          patchContainers:
+                            description: |-
+                              PatchContainers consents to the profile's containerPatches. Each entry
+                              is a bare container name addressing exactly one spec.
+                            items:
+                              maxLength: 63
+                              type: string
+                            maxItems: 32
+                            minItems: 1
+                            type: array
+                            x-kubernetes-validations:
+                            - message: container names must be DNS labels
+                              rule: self.all(p, p.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'))
                           profileName:
-                            description: ProfileName specifies the name of the engine
-                              runtime profile to be used
+                            description: |-
+                              ProfileName specifies the name of the ClusterEngineRuntimeProfile
+                              applied to this role, resolved at render time.
+                            minLength: 1
                             type: string
                         required:
                         - profileName
                         type: object
+                      maxItems: 16
                       type: array
+                      x-kubernetes-validations:
+                      - message: patchContainers and containerPatches require component
+                          to be set
+                        rule: self.all(p, (!has(p.patchContainers) || has(p.component))
+                          && (!has(p.containerPatches) || has(p.component)))
                     labels:
                       additionalProperties:
                         type: string
@@ -49416,6 +49745,7 @@ spec:
                       || !has(self.annotations) || !(''rbg.workloads.x-k8s.io/role-workload-type''
                       in self.annotations) || self.annotations[''rbg.workloads.x-k8s.io/role-workload-type'']
                       == ''workloads.x-k8s.io/v1alpha2/RoleInstanceSet'''
+                maxItems: 16
                 minItems: 1
                 type: array
                 x-kubernetes-list-map-keys:
@@ -57352,6 +57682,7 @@ spec:
                     - name
                     x-kubernetes-list-type: map
                   roles:
+                    description: Roles is the set of role specifications.
                     items:
                       description: |-
                         RoleSpec defines the specification for a role in the group
@@ -57403,11 +57734,97 @@ spec:
                           type: array
                         engineRuntimes:
                           items:
+                            description: |-
+                              EngineRuntime references one ClusterEngineRuntimeProfile and carries the
+                              role's targeting decisions for the profile's two delivery dimensions: the
+                              pod-level fragments (initContainers, containers,...
                             properties:
+                              component:
+                                description: |-
+                                  Component scopes this reference to the named component of the role's
+                                  pattern — `leader` or `worker` under leaderWorkerPattern, a declared
+                                  component name under customComponentsPattern.
+                                maxLength: 63
+                                minLength: 1
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                type: string
+                              containerPatches:
+                                description: |-
+                                  ContainerPatches expresses the role's patches into the profile's
+                                  containers — the direction opposite to patchContainers.
+                                items:
+                                  description: |-
+                                    EngineRuntimeContainerPatch is one ordered role-side operation applied to
+                                    one profile-declared container at render time.
+                                  properties:
+                                    container:
+                                      description: |-
+                                        Container names the profile-declared container (init container or
+                                        sidecar) this entry patches, in the named component's rendered
+                                        template.
+                                      maxLength: 63
+                                      minLength: 1
+                                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                      type: string
+                                    jsonPatch:
+                                      description: |-
+                                        JSONPatch carries the RFC 6902 format: `add`-only operations
+                                        with container-relative paths. See ContainerJSONPatch for its
+                                        grammar.
+                                      properties:
+                                        op:
+                                          description: |-
+                                            Op is the patch operation. Only `add` is accepted today;
+                                            `replace` is reserved as a future enum value and rejected.
+                                          enum:
+                                          - add
+                                          type: string
+                                        path:
+                                          description: |-
+                                            Path is an RFC 6901 pointer relative to the rendered target
+                                            container: `/command/0` prepends an argv element (head insert,
+                                            so multi-element prepends are written in reverse order),
+                                            `/env/0` inserts an...
+                                          minLength: 1
+                                          type: string
+                                        value:
+                                          description: |-
+                                            Value is the JSON value the operation adds, in the shape of
+                                            the path's element: a string for /command, /args and
+                                            /securityContext/capabilities/add elements; a corev1.EnvVar
+                                            object for /env; a corev1.
+                                          x-kubernetes-preserve-unknown-fields: true
+                                      required:
+                                      - op
+                                      - path
+                                      - value
+                                      type: object
+                                      x-kubernetes-validations:
+                                      - message: path must be an element pointer under
+                                          /command, /args, /env, /volumeMounts or
+                                          /securityContext/capabilities/add
+                                        rule: self.path.startsWith('/command/') ||
+                                          self.path.startsWith('/args/') || self.path.startsWith('/env/')
+                                          || self.path.startsWith('/volumeMounts/')
+                                          || self.path.startsWith('/securityContext/capabilities/add/')
+                                  required:
+                                  - container
+                                  type: object
+                                  x-kubernetes-validations:
+                                  - message: exactly one patch field must be set
+                                    rule: has(self.jsonPatch)
+                                maxItems: 32
+                                minItems: 1
+                                type: array
+                                x-kubernetes-list-type: atomic
+                                x-kubernetes-validations:
+                                - message: exactly one patch field must be set
+                                  rule: self.all(p, has(p.jsonPatch))
                               containers:
-                                description: Containers specifies the engine runtime
-                                  containers to be overridden, only support command,args
-                                  overridden
+                                description: |-
+                                  Containers appends role-provided env/args to profile-provided
+                                  containers, applied within the reference's component scope before
+                                  containerPatches.
                                 items:
                                   description: A single application container that
                                     you want to run within a pod.
@@ -58791,19 +59208,42 @@ spec:
                                   type: object
                                 type: array
                               injectContainers:
-                                description: InjectContainers specifies the containers
-                                  to be injected with the engine runtime
+                                description: |-
+                                  InjectContainers predates the consent model of this API version and
+                                  carries no semantics: the field is optional, its values are accepted
+                                  and ignored, and nothing reads it.
                                 items:
                                   type: string
                                 type: array
+                              patchContainers:
+                                description: |-
+                                  PatchContainers consents to the profile's containerPatches. Each entry
+                                  is a bare container name addressing exactly one spec.
+                                items:
+                                  maxLength: 63
+                                  type: string
+                                maxItems: 32
+                                minItems: 1
+                                type: array
+                                x-kubernetes-validations:
+                                - message: container names must be DNS labels
+                                  rule: self.all(p, p.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'))
                               profileName:
-                                description: ProfileName specifies the name of the
-                                  engine runtime profile to be used
+                                description: |-
+                                  ProfileName specifies the name of the ClusterEngineRuntimeProfile
+                                  applied to this role, resolved at render time.
+                                minLength: 1
                                 type: string
                             required:
                             - profileName
                             type: object
+                          maxItems: 16
                           type: array
+                          x-kubernetes-validations:
+                          - message: patchContainers and containerPatches require
+                              component to be set
+                            rule: self.all(p, (!has(p.patchContainers) || has(p.component))
+                              && (!has(p.containerPatches) || has(p.component)))
                         labels:
                           additionalProperties:
                             type: string
@@ -66452,6 +66892,7 @@ spec:
                           && self.workload.kind == 'InstanceSet')
                       - message: template and templateRef are mutually exclusive
                         rule: '!(has(self.template) && has(self.templateRef))'
+                    maxItems: 16
                     minItems: 1
                     type: array
                     x-kubernetes-list-map-keys:
@@ -74141,6 +74582,7 @@ spec:
                         - name
                         x-kubernetes-list-type: map
                       roles:
+                        description: Roles is the set of role specifications.
                         items:
                           description: RoleSpec defines the specification for a role
                             in the group
@@ -74255,10 +74697,97 @@ spec:
                               type: array
                             engineRuntimes:
                               items:
+                                description: |-
+                                  EngineRuntime references one ClusterEngineRuntimeProfile and carries the
+                                  role's targeting decisions for the profile's two delivery dimensions: the
+                                  pod-level fragments (initContainers, containers,...
                                 properties:
+                                  component:
+                                    description: |-
+                                      Component scopes this reference to the named component of the role's
+                                      pattern — `leader` or `worker` under leaderWorkerPattern, a declared
+                                      component name under customComponentsPattern.
+                                    maxLength: 63
+                                    minLength: 1
+                                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                    type: string
+                                  containerPatches:
+                                    description: |-
+                                      ContainerPatches expresses the role's patches into the profile's
+                                      containers — the direction opposite to patchContainers.
+                                    items:
+                                      description: |-
+                                        EngineRuntimeContainerPatch is one ordered role-side operation applied to
+                                        one profile-declared container at render time.
+                                      properties:
+                                        container:
+                                          description: |-
+                                            Container names the profile-declared container (init container or
+                                            sidecar) this entry patches, in the named component's rendered
+                                            template.
+                                          maxLength: 63
+                                          minLength: 1
+                                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                          type: string
+                                        jsonPatch:
+                                          description: |-
+                                            JSONPatch carries the RFC 6902 format: `add`-only operations
+                                            with container-relative paths. See ContainerJSONPatch for its
+                                            grammar.
+                                          properties:
+                                            op:
+                                              description: |-
+                                                Op is the patch operation. Only `add` is accepted today;
+                                                `replace` is reserved as a future enum value and rejected.
+                                              enum:
+                                              - add
+                                              type: string
+                                            path:
+                                              description: |-
+                                                Path is an RFC 6901 pointer relative to the rendered target
+                                                container: `/command/0` prepends an argv element (head insert,
+                                                so multi-element prepends are written in reverse order),
+                                                `/env/0` inserts an...
+                                              minLength: 1
+                                              type: string
+                                            value:
+                                              description: |-
+                                                Value is the JSON value the operation adds, in the shape of
+                                                the path's element: a string for /command, /args and
+                                                /securityContext/capabilities/add elements; a corev1.EnvVar
+                                                object for /env; a corev1.
+                                              x-kubernetes-preserve-unknown-fields: true
+                                          required:
+                                          - op
+                                          - path
+                                          - value
+                                          type: object
+                                          x-kubernetes-validations:
+                                          - message: path must be an element pointer
+                                              under /command, /args, /env, /volumeMounts
+                                              or /securityContext/capabilities/add
+                                            rule: self.path.startsWith('/command/')
+                                              || self.path.startsWith('/args/') ||
+                                              self.path.startsWith('/env/') || self.path.startsWith('/volumeMounts/')
+                                              || self.path.startsWith('/securityContext/capabilities/add/')
+                                      required:
+                                      - container
+                                      type: object
+                                      x-kubernetes-validations:
+                                      - message: exactly one patch field must be set
+                                        rule: has(self.jsonPatch)
+                                    maxItems: 32
+                                    minItems: 1
+                                    type: array
+                                    x-kubernetes-list-type: atomic
+                                    x-kubernetes-validations:
+                                    - message: exactly one patch field must be set
+                                      rule: self.all(p, has(p.jsonPatch))
                                   containers:
-                                    description: Containers specifies the engine runtime
-                                      containers to be overridden
+                                    description: |-
+                                      Containers appends role-provided env/args to profile-provided
+                                      containers, applied within the reference's component scope before
+                                      containerPatches.
                                     items:
                                       description: A single application container
                                         that you want to run within a pod.
@@ -75657,19 +76186,42 @@ spec:
                                       type: object
                                     type: array
                                   injectContainers:
-                                    description: InjectContainers specifies the containers
-                                      to be injected with the engine runtime
+                                    description: |-
+                                      InjectContainers predates the consent model of this API version and
+                                      carries no semantics: the field is optional, its values are accepted
+                                      and ignored, and nothing reads it.
                                     items:
                                       type: string
                                     type: array
+                                  patchContainers:
+                                    description: |-
+                                      PatchContainers consents to the profile's containerPatches. Each entry
+                                      is a bare container name addressing exactly one spec.
+                                    items:
+                                      maxLength: 63
+                                      type: string
+                                    maxItems: 32
+                                    minItems: 1
+                                    type: array
+                                    x-kubernetes-validations:
+                                    - message: container names must be DNS labels
+                                      rule: self.all(p, p.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'))
                                   profileName:
-                                    description: ProfileName specifies the name of
-                                      the engine runtime profile to be used
+                                    description: |-
+                                      ProfileName specifies the name of the ClusterEngineRuntimeProfile
+                                      applied to this role, resolved at render time.
+                                    minLength: 1
                                     type: string
                                 required:
                                 - profileName
                                 type: object
+                              maxItems: 16
                               type: array
+                              x-kubernetes-validations:
+                              - message: patchContainers and containerPatches require
+                                  component to be set
+                                rule: self.all(p, (!has(p.patchContainers) || has(p.component))
+                                  && (!has(p.containerPatches) || has(p.component)))
                             labels:
                               additionalProperties:
                                 type: string
@@ -91375,6 +91927,7 @@ spec:
                               ''LeaderOnly'' || !has(self.annotations) || !(''rbg.workloads.x-k8s.io/role-workload-type''
                               in self.annotations) || self.annotations[''rbg.workloads.x-k8s.io/role-workload-type'']
                               == ''workloads.x-k8s.io/v1alpha2/RoleInstanceSet'''
+                        maxItems: 16
                         minItems: 1
                         type: array
                         x-kubernetes-list-map-keys:

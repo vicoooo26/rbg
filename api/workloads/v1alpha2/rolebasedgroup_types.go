@@ -61,8 +61,13 @@ type TemplateRef struct {
 
 // RoleBasedGroupSpec defines the desired state of RoleBasedGroup.
 type RoleBasedGroupSpec struct {
+	// Roles is the set of role specifications. The MaxItems bound is load-bearing:
+	// the CEL rules on RoleSpec cost-estimate against the enclosing array's
+	// cardinality, so an unbounded roles list would make the CRD exceed the
+	// apiserver's CEL cost budget at install time.
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=16
 	// +kubebuilder:validation:Required
 	// +patchMergeKey=name
 	// +patchStrategy=merge
@@ -280,6 +285,8 @@ type RoleSpec struct {
 	ServicePorts []corev1.ServicePort `json:"servicePorts,omitempty"`
 
 	// +optional
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:XValidation:rule="self.all(p, (!has(p.patchContainers) || has(p.component)) && (!has(p.containerPatches) || has(p.component)))",message="patchContainers and containerPatches require component to be set"
 	EngineRuntimes []EngineRuntime `json:"engineRuntimes,omitempty"`
 
 	// +optional
@@ -462,16 +469,107 @@ func (w *WorkloadSpec) String() string {
 	return fmt.Sprintf("%s/%s", w.APIVersion, w.Kind)
 }
 
+// EngineRuntime references one ClusterEngineRuntimeProfile and carries the
+// role's targeting decisions for the profile's two delivery dimensions: the
+// pod-level fragments (initContainers, containers, volumes) and the
+// container patches.
 type EngineRuntime struct {
-	// ProfileName specifies the name of the engine runtime profile to be used
+	// ProfileName specifies the name of the ClusterEngineRuntimeProfile
+	// applied to this role, resolved at render time.
+	//
+	// +kubebuilder:validation:MinLength=1
 	ProfileName string `json:"profileName"`
 
-	// InjectContainers specifies the containers to be injected with the engine runtime
+	// Component scopes this reference to the named component of the role's
+	// pattern — `leader` or `worker` under leaderWorkerPattern, a declared
+	// component name under customComponentsPattern. A role consumes the
+	// same profile in several components through several references with
+	// the same profileName. Absent, the profile's pod-level fragments and
+	// the legacy containers merge apply to every component of the pattern.
+	// patchContainers and containerPatches require this field (a CEL rule
+	// rejects either without it), so the patch dimensions always operate on
+	// the one named component. An explicit component on a standalonePattern
+	// role is a render error: the pattern defines no component vocabulary
+	// to name. Two references with the same profileName must not name the
+	// same component; each component of a profile is targeted by at most
+	// one reference.
+	//
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Component string `json:"component,omitempty"`
+
+	// PatchContainers consents to the profile's containerPatches. Each entry
+	// is a bare container name addressing exactly one spec.containers member
+	// of the named component's rendered template; the profile's patches fire
+	// at the consented addresses in the profile's list order. Absent, the
+	// patches do not fire and the render succeeds; if the profile declares
+	// containerPatches, a warning event is emitted — absent consent is a
+	// valid state, so profile evolution cannot break pre-existing
+	// referencing workloads. A name resolving to a profile-injected container
+	// is a render error; a name colliding with a profile-declared container
+	// resolves to the role's own container and is legal. The same name
+	// listed twice in one reference is a render error.
+	//
+	// +optional
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:XValidation:rule="self.all(p, p.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'))",message="container names must be DNS labels"
+	PatchContainers []string `json:"patchContainers,omitempty"`
+
+	// ContainerPatches expresses the role's patches into the profile's
+	// containers — the direction opposite to patchContainers. Each entry
+	// names one profile-declared container (init container or sidecar)
+	// rendered into the named component and applies one RFC 6902 `add`-only
+	// operation to it, in list order. An entry naming a container the
+	// profile does not declare is a render error. A patch adding an env var
+	// the target already declares (profile-declared, appended by the legacy
+	// containers mechanism, or added by an earlier entry) is a render error.
+	//
+	// +optional
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:XValidation:rule="self.all(p, has(p.jsonPatch))",message="exactly one patch field must be set"
+	// +listType=atomic
+	ContainerPatches []EngineRuntimeContainerPatch `json:"containerPatches,omitempty"`
+
+	// Containers appends role-provided env/args to profile-provided
+	// containers, applied within the reference's component scope before
+	// containerPatches. Superseded by containerPatches, which expresses the
+	// same intent with a precise grammar; retained for compatibility.
+	// +optional
+	Containers []corev1.Container `json:"containers,omitempty"`
+
+	// InjectContainers predates the consent model of this API version and
+	// carries no semantics: the field is optional, its values are accepted
+	// and ignored, and nothing reads it. It is removed at the next API
+	// version boundary.
+	//
 	// +optional
 	InjectContainers []string `json:"injectContainers,omitempty"`
+}
 
-	// Containers specifies the engine runtime containers to be overridden
-	Containers []corev1.Container `json:"containers,omitempty"`
+// EngineRuntimeContainerPatch is one ordered role-side operation applied to
+// one profile-declared container at render time.
+// +kubebuilder:validation:XValidation:rule="has(self.jsonPatch)",message="exactly one patch field must be set"
+type EngineRuntimeContainerPatch struct {
+	// Container names the profile-declared container (init container or
+	// sidecar) this entry patches, in the named component's rendered
+	// template.
+	//
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:Required
+	Container string `json:"container"`
+
+	// JSONPatch carries the RFC 6902 format: `add`-only operations
+	// with container-relative paths. See ContainerJSONPatch for its
+	// grammar.
+	// +optional
+	JSONPatch *ContainerJSONPatch `json:"jsonPatch,omitempty"`
 }
 
 type InstanceComponent struct {

@@ -672,6 +672,73 @@ func TestRoleBasedGroup_RoundTrip_LossyFieldsPreserved(t *testing.T) {
 	assert.Equal(t, "coord", restored.Spec.CoordinationRequirements[0].Name)
 }
 
+// TestRoleBasedGroup_EngineRuntimeRoundTrip verifies that every EngineRuntime
+// field survives a v1alpha1 → v1alpha2 → v1alpha1 round-trip through the
+// Hub conversion: component, patchContainers, containerPatches (including
+// the JSONPatch pointer) and the inert injectContainers data.
+func TestRoleBasedGroup_EngineRuntimeRoundTrip(t *testing.T) {
+	src := &RoleBasedGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "rt-roundtrip", Namespace: "ns"},
+		Spec: RoleBasedGroupSpec{
+			Roles: []RoleSpec{{
+				Name: "worker",
+				EngineRuntimes: []EngineRuntime{{
+					ProfileName:      "p",
+					Component:        "worker",
+					PatchContainers:  []string{"engine"},
+					InjectContainers: []string{"worker/engine"},
+					ContainerPatches: []EngineRuntimeContainerPatch{{
+						Container: "engine",
+						JSONPatch: &ContainerJSONPatch{
+							Op:   "add",
+							Path: "/env/0",
+							Value: runtime.RawExtension{Raw: []byte(
+								`{"name":"PATCHED","value":"v"}`)},
+						},
+					}},
+				}},
+			}},
+		},
+	}
+
+	hub := &v2.RoleBasedGroup{}
+	require.NoError(t, src.ConvertTo(hub))
+
+	got := hub.Spec.Roles[0].EngineRuntimes[0]
+	assert.Equal(t, "p", got.ProfileName)
+	assert.Equal(t, "worker", got.Component,
+		"ConvertTo must not drop Component")
+	assert.Equal(t, []string{"engine"}, got.PatchContainers,
+		"ConvertTo must not drop PatchContainers")
+	assert.Equal(t, []string{"worker/engine"}, got.InjectContainers,
+		"ConvertTo must not drop InjectContainers")
+	require.Len(t, got.ContainerPatches, 1)
+	require.NotNil(t, got.ContainerPatches[0].JSONPatch)
+	assert.Equal(t, v2.ContainerJSONPatch{
+		Op: "add", Path: "/env/0",
+		Value: runtime.RawExtension{Raw: []byte(`{"name":"PATCHED","value":"v"}`)},
+	}, *got.ContainerPatches[0].JSONPatch,
+		"ConvertTo must convert the JSONPatch pointer field-by-field")
+
+	back := &RoleBasedGroup{}
+	require.NoError(t, back.ConvertFrom(hub))
+
+	rt := back.Spec.Roles[0].EngineRuntimes[0]
+	assert.Equal(t, "p", rt.ProfileName)
+	assert.Equal(t, "worker", rt.Component,
+		"round-trip must not drop Component")
+	assert.Equal(t, []string{"engine"}, rt.PatchContainers,
+		"round-trip must not drop PatchContainers")
+	assert.Equal(t, []string{"worker/engine"}, rt.InjectContainers)
+	require.Len(t, rt.ContainerPatches, 1)
+	require.NotNil(t, rt.ContainerPatches[0].JSONPatch)
+	assert.Equal(t, ContainerJSONPatch{
+		Op: "add", Path: "/env/0",
+		Value: runtime.RawExtension{Raw: []byte(`{"name":"PATCHED","value":"v"}`)},
+	}, *rt.ContainerPatches[0].JSONPatch,
+		"round-trip must convert the JSONPatch pointer back verbatim")
+}
+
 // TestRoleBasedGroup_ConvertTo_CoordinationStrategyRollingUpdate verifies that a
 // v1alpha1 coordination with a RollingUpdate strategy is correctly serialized
 // into the migration annotation, including all strategy fields.

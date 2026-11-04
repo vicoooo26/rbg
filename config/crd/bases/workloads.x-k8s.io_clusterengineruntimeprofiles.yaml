@@ -42,6 +42,61 @@ spec:
             description: ClusterEngineRuntimeProfileSpec defines the desired state
               of ClusterEngineRuntimeProfile.
             properties:
+              containerPatches:
+                description: |-
+                  ContainerPatches applies ordered per-container modifications to the
+                  role containers named by each referencing EngineRuntime's
+                  patchContainers at render time, in list order.
+                items:
+                  description: ContainerPatch is one ordered per-container modification.
+                  properties:
+                    jsonPatch:
+                      description: |-
+                        JSONPatch carries the RFC 6902 format: `add`-only operations
+                        with container-relative paths. See ContainerJSONPatch for its
+                        grammar.
+                      properties:
+                        op:
+                          description: |-
+                            Op is the patch operation. Only `add` is accepted today;
+                            `replace` is reserved as a future enum value and rejected.
+                          enum:
+                          - add
+                          type: string
+                        path:
+                          description: |-
+                            Path is an RFC 6901 pointer relative to the rendered target
+                            container: `/command/0` prepends an argv element (head insert,
+                            so multi-element prepends are written in reverse order),
+                            `/env/0` inserts an...
+                          minLength: 1
+                          type: string
+                        value:
+                          description: |-
+                            Value is the JSON value the operation adds, in the shape of
+                            the path's element: a string for /command, /args and
+                            /securityContext/capabilities/add elements; a corev1.EnvVar
+                            object for /env; a corev1.
+                          x-kubernetes-preserve-unknown-fields: true
+                      required:
+                      - op
+                      - path
+                      - value
+                      type: object
+                      x-kubernetes-validations:
+                      - message: path must be an element pointer under /command, /args,
+                          /env, /volumeMounts or /securityContext/capabilities/add
+                        rule: self.path.startsWith('/command/') || self.path.startsWith('/args/')
+                          || self.path.startsWith('/env/') || self.path.startsWith('/volumeMounts/')
+                          || self.path.startsWith('/securityContext/capabilities/add/')
+                  type: object
+                  x-kubernetes-validations:
+                  - message: exactly one patch field must be set
+                    rule: has(self.jsonPatch)
+                maxItems: 32
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: atomic
               containers:
                 items:
                   description: A single application container that you want to run
@@ -4355,6 +4410,61 @@ spec:
             description: ClusterEngineRuntimeProfileSpec defines the desired state
               of ClusterEngineRuntimeProfile.
             properties:
+              containerPatches:
+                description: |-
+                  ContainerPatches applies ordered per-container modifications to the
+                  role containers named by each referencing EngineRuntime's
+                  patchContainers at render time, in list order.
+                items:
+                  description: ContainerPatch is one ordered per-container modification.
+                  properties:
+                    jsonPatch:
+                      description: |-
+                        JSONPatch carries the RFC 6902 format: `add`-only operations
+                        with container-relative paths. See ContainerJSONPatch for its
+                        grammar.
+                      properties:
+                        op:
+                          description: |-
+                            Op is the patch operation. Only `add` is accepted today;
+                            `replace` is reserved as a future enum value and rejected.
+                          enum:
+                          - add
+                          type: string
+                        path:
+                          description: |-
+                            Path is an RFC 6901 pointer relative to the rendered target
+                            container: `/command/0` prepends an argv element (head insert,
+                            so multi-element prepends are written in reverse order),
+                            `/env/0` inserts an...
+                          minLength: 1
+                          type: string
+                        value:
+                          description: |-
+                            Value is the JSON value the operation adds, in the shape of
+                            the path's element: a string for /command, /args and
+                            /securityContext/capabilities/add elements; a corev1.EnvVar
+                            object for /env; a corev1.
+                          x-kubernetes-preserve-unknown-fields: true
+                      required:
+                      - op
+                      - path
+                      - value
+                      type: object
+                      x-kubernetes-validations:
+                      - message: path must be an element pointer under /command, /args,
+                          /env, /volumeMounts or /securityContext/capabilities/add
+                        rule: self.path.startsWith('/command/') || self.path.startsWith('/args/')
+                          || self.path.startsWith('/env/') || self.path.startsWith('/volumeMounts/')
+                          || self.path.startsWith('/securityContext/capabilities/add/')
+                  type: object
+                  x-kubernetes-validations:
+                  - message: exactly one patch field must be set
+                    rule: has(self.jsonPatch)
+                maxItems: 32
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: atomic
               containers:
                 items:
                   description: A single application container that you want to run

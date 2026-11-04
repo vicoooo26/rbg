@@ -294,8 +294,29 @@ func convertEngineRuntimesV1alpha1ToV2(src []EngineRuntime) []v2.EngineRuntime {
 	for i, er := range src {
 		dst[i] = v2.EngineRuntime{
 			ProfileName:      er.ProfileName,
+			Component:        er.Component,
+			PatchContainers:  er.PatchContainers,
+			ContainerPatches: convertEngineRuntimeContainerPatchesV1alpha1ToV2(er.ContainerPatches),
 			InjectContainers: er.InjectContainers,
 			Containers:       er.Containers,
+		}
+	}
+	return dst
+}
+
+func convertEngineRuntimeContainerPatchesV1alpha1ToV2(
+	in []EngineRuntimeContainerPatch,
+) []v2.EngineRuntimeContainerPatch {
+	if in == nil {
+		return nil
+	}
+	dst := make([]v2.EngineRuntimeContainerPatch, len(in))
+	for i, p := range in {
+		dst[i] = v2.EngineRuntimeContainerPatch{Container: p.Container}
+		if p.JSONPatch != nil {
+			dst[i].JSONPatch = &v2.ContainerJSONPatch{
+				Op: p.JSONPatch.Op, Path: p.JSONPatch.Path, Value: p.JSONPatch.Value,
+			}
 		}
 	}
 	return dst
@@ -475,8 +496,29 @@ func convertEngineRuntimesV2ToV1alpha1(src []v2.EngineRuntime) []EngineRuntime {
 	for i, er := range src {
 		dst[i] = EngineRuntime{
 			ProfileName:      er.ProfileName,
+			Component:        er.Component,
+			PatchContainers:  er.PatchContainers,
+			ContainerPatches: convertEngineRuntimeContainerPatchesV2ToV1alpha1(er.ContainerPatches),
 			InjectContainers: er.InjectContainers,
 			Containers:       er.Containers,
+		}
+	}
+	return dst
+}
+
+func convertEngineRuntimeContainerPatchesV2ToV1alpha1(
+	in []v2.EngineRuntimeContainerPatch,
+) []EngineRuntimeContainerPatch {
+	if in == nil {
+		return nil
+	}
+	dst := make([]EngineRuntimeContainerPatch, len(in))
+	for i, p := range in {
+		dst[i] = EngineRuntimeContainerPatch{Container: p.Container}
+		if p.JSONPatch != nil {
+			dst[i].JSONPatch = &ContainerJSONPatch{
+				Op: p.JSONPatch.Op, Path: p.JSONPatch.Path, Value: p.JSONPatch.Value,
+			}
 		}
 	}
 	return dst
