@@ -7660,23 +7660,24 @@ spec:
                         engineRuntimes:
                           items:
                             description: |-
-                              EngineRuntime references one ClusterEngineRuntimeProfile and carries the
-                              role's targeting decisions: where the profile's pod-level fragments
-                              (initContainers, containers, volumes) apply, consent for...
+                              EngineRuntime references one ClusterEngineRuntimeProfile, carrying
+                              the role's targeting: where its pod-level fragments apply, consent
+                              for its container patches, and the role's own patches.
                             properties:
                               component:
                                 description: |-
-                                  Component scopes this reference to the named component of the role's
-                                  pattern — `leader` or `worker` under leaderWorkerPattern, a declared
-                                  component name under customComponentsPattern.
+                                  Component scopes this reference to one component of the role's
+                                  pattern; absent, the reference keeps the pattern's default
+                                  component set — the leader only under leaderWorkerPattern.
                                 maxLength: 63
                                 minLength: 1
                                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                                 type: string
                               containerPatches:
                                 description: |-
-                                  ContainerPatches expresses the role's own patches into the
-                                  reference's component — the direction opposite to patchContainers.
+                                  ContainerPatches expresses the role's patches, each entry naming
+                                  its target container — role-declared or profile-declared — within
+                                  the reference's component.
                                 items:
                                   description: |-
                                     EngineRuntimeContainerPatch is one ordered role-side operation applied to
@@ -7749,8 +7750,9 @@ spec:
                               containers:
                                 description: |-
                                   Containers appends role-provided env/args to profile-provided
-                                  containers, applied within the reference's component scope before
-                                  containerPatches — pod-level append and this merge are interleaved...
+                                  containers within the reference's component; an override entry
+                                  appending an env var the target already declares is a render
+                                  error.
                                 items:
                                   description: A single application container that
                                     you want to run within a pod.
@@ -24624,23 +24626,24 @@ spec:
                             engineRuntimes:
                               items:
                                 description: |-
-                                  EngineRuntime references one ClusterEngineRuntimeProfile and carries the
-                                  role's targeting decisions: where the profile's pod-level fragments
-                                  (initContainers, containers, volumes) apply, consent for...
+                                  EngineRuntime references one ClusterEngineRuntimeProfile, carrying
+                                  the role's targeting: where its pod-level fragments apply, consent
+                                  for its container patches, and the role's own patches.
                                 properties:
                                   component:
                                     description: |-
-                                      Component scopes this reference to the named component of the role's
-                                      pattern — `leader` or `worker` under leaderWorkerPattern, a declared
-                                      component name under customComponentsPattern.
+                                      Component scopes this reference to one component of the role's
+                                      pattern; absent, the reference keeps the pattern's default
+                                      component set — the leader only under leaderWorkerPattern.
                                     maxLength: 63
                                     minLength: 1
                                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                                     type: string
                                   containerPatches:
                                     description: |-
-                                      ContainerPatches expresses the role's own patches into the
-                                      reference's component — the direction opposite to patchContainers.
+                                      ContainerPatches expresses the role's patches, each entry naming
+                                      its target container — role-declared or profile-declared — within
+                                      the reference's component.
                                     items:
                                       description: |-
                                         EngineRuntimeContainerPatch is one ordered role-side operation applied to
@@ -24713,8 +24716,9 @@ spec:
                                   containers:
                                     description: |-
                                       Containers appends role-provided env/args to profile-provided
-                                      containers, applied within the reference's component scope before
-                                      containerPatches — pod-level append and this merge are interleaved...
+                                      containers within the reference's component; an override entry
+                                      appending an env var the target already declares is a render
+                                      error.
                                     items:
                                       description: A single application container
                                         that you want to run within a pod.
