@@ -122,6 +122,7 @@ func (r *PodReconciler) ConstructPodTemplateSpecApplyConfiguration(
 			return nil, fmt.Errorf("failed to inject config: %w", err)
 		}
 	}
+	var roleContainerNames, roleInitContainerNames map[string]struct{}
 	if r.engineRuntimePlan != nil {
 		if r.engineRuntimePosition == "" {
 			return nil, fmt.Errorf("engine runtime plan is set but the template's position is not")
@@ -149,11 +150,11 @@ func (r *PodReconciler) ConstructPodTemplateSpecApplyConfiguration(
 		// initContainers are never addressable). The role-declared init
 		// container names join them only for the role-side pass's
 		// ownership check.
-		roleContainerNames := make(map[string]struct{}, len(podTemplateSpec.Spec.Containers))
+		roleContainerNames = make(map[string]struct{}, len(podTemplateSpec.Spec.Containers))
 		for _, c := range podTemplateSpec.Spec.Containers {
 			roleContainerNames[c.Name] = struct{}{}
 		}
-		roleInitContainerNames := make(map[string]struct{}, len(podTemplateSpec.Spec.InitContainers))
+		roleInitContainerNames = make(map[string]struct{}, len(podTemplateSpec.Spec.InitContainers))
 		for _, c := range podTemplateSpec.Spec.InitContainers {
 			roleInitContainerNames[c.Name] = struct{}{}
 		}
@@ -161,19 +162,22 @@ func (r *PodReconciler) ConstructPodTemplateSpecApplyConfiguration(
 			ctx, &podTemplateSpec,
 			r.engineRuntimePlan.FragmentApplications[r.engineRuntimePosition],
 		)
-		// KEP-531 application order: role-side containerPatches apply after the
-		// fragment/legacy-merge pass and before the profile-side pass.
-		if err := discovery.ApplyRoleEngineRuntimePatches(
-			ctx, &podTemplateSpec, roleContainerNames, roleInitContainerNames,
-			r.engineRuntimePlan.RolePatchApplications[r.engineRuntimePosition],
-			r.engineRuntimePlan.RoleName,
-		); err != nil {
-			if r.recorder != nil {
-				r.recorder.Event(rbg, corev1.EventTypeWarning, discovery.ReasonEngineRuntimeRenderFailed,
-					fmt.Sprintf("engine runtime render failed: %s", err.Error()))
-			}
-			return nil, fmt.Errorf("failed to apply role engine runtime patches: %w", err)
+	}
+	if utils.ContainsString(r.injectObjects, commonEnvInjector) {
+		if err := injector.InjectEnv(ctx, &podTemplateSpec, rbg, role); err != nil {
+			return nil, fmt.Errorf("failed to inject env vars: %w", err)
 		}
+	}
+	if utils.ContainsString(r.injectObjects, lwpEnvInjector) {
+		if err := injector.InjectLeaderWorkerSetEnv(ctx, &podTemplateSpec, rbg, role); err != nil {
+			return nil, fmt.Errorf("failed to inject env vars: %w", err)
+		}
+	}
+	if r.engineRuntimePlan != nil {
+		// KEP-531 render pipeline: the patch passes run after the full
+		// built-in injector chain, so a patch-appended env entry is never
+		// dropped or reordered by the built-in env dedup, and the patch
+		// duplicate-name check also sees the built-in RBG_* entries.
 		if err := discovery.ApplyEngineRuntimePatches(
 			ctx, &podTemplateSpec, roleContainerNames,
 			r.engineRuntimePlan.PatchApplications[r.engineRuntimePosition],
@@ -184,15 +188,18 @@ func (r *PodReconciler) ConstructPodTemplateSpecApplyConfiguration(
 			}
 			return nil, fmt.Errorf("failed to apply engine runtime patches: %w", err)
 		}
-	}
-	if utils.ContainsString(r.injectObjects, commonEnvInjector) {
-		if err := injector.InjectEnv(ctx, &podTemplateSpec, rbg, role); err != nil {
-			return nil, fmt.Errorf("failed to inject env vars: %w", err)
-		}
-	}
-	if utils.ContainsString(r.injectObjects, lwpEnvInjector) {
-		if err := injector.InjectLeaderWorkerSetEnv(ctx, &podTemplateSpec, rbg, role); err != nil {
-			return nil, fmt.Errorf("failed to inject env vars: %w", err)
+		// KEP-531 application order: the role-side containerPatches pass
+		// applies last — what the role writes lands where it is written.
+		if err := discovery.ApplyRoleEngineRuntimePatches(
+			ctx, &podTemplateSpec, roleContainerNames, roleInitContainerNames,
+			r.engineRuntimePlan.RolePatchApplications[r.engineRuntimePosition],
+			r.engineRuntimePlan.RoleName,
+		); err != nil {
+			if r.recorder != nil {
+				r.recorder.Event(rbg, corev1.EventTypeWarning, discovery.ReasonEngineRuntimeRenderFailed,
+					fmt.Sprintf("engine runtime render failed: %s", err.Error()))
+			}
+			return nil, fmt.Errorf("failed to apply role engine runtime patches: %w", err)
 		}
 	}
 

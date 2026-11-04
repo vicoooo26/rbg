@@ -176,7 +176,8 @@ func ApplyEngineRuntimePatches(
 // ApplyRoleEngineRuntimePatches applies the role-side containerPatches of
 // one position's references to the profile-declared containers rendered
 // into it, in reference order then list order — the KEP-531 application order,
-// after the fragment/legacy-merge pass and before the profile-side pass.
+// after the fragment/legacy-merge pass, the built-in injector chain and the
+// profile-side pass: role-side patches land last.
 // The resolver already rejected targets the profile does not declare; here
 // a target must additionally exist in the rendered spec and must not
 // collide with a container or init container the role's own template

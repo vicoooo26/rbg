@@ -358,9 +358,9 @@ func volumeNamesOf(spec *v1.PodTemplateSpec) []string {
 
 // renderResolvedPosition runs the PodReconciler render flow for one position:
 // the role's own container and init container names captured before any
-// injection, then the fragment pass, then the role-side patch pass, then
-// the profile-side patch pass — the KEP-531 application order — over a copy
-// of the position's role-declared template.
+// injection, then the fragment pass, then the profile-side patch pass, then
+// the role-side patch pass — the KEP-531 application order, role-side last —
+// over a copy of the position's role-declared template.
 func renderResolvedPosition(
 	t *testing.T,
 	plan *EngineRuntimePlan,
@@ -379,14 +379,14 @@ func renderResolvedPosition(
 	}
 	ctx := context.Background()
 	InjectEngineRuntimeFragments(ctx, spec, plan.FragmentApplications[position])
-	if err := ApplyRoleEngineRuntimePatches(
-		ctx, spec, roleContainerNames, roleInitContainerNames,
-		plan.RolePatchApplications[position], plan.RoleName,
-	); err != nil {
+	if err := ApplyEngineRuntimePatches(
+		ctx, spec, roleContainerNames, plan.PatchApplications[position]); err != nil {
 		return spec, err
 	}
-	err := ApplyEngineRuntimePatches(
-		ctx, spec, roleContainerNames, plan.PatchApplications[position])
+	err := ApplyRoleEngineRuntimePatches(
+		ctx, spec, roleContainerNames, roleInitContainerNames,
+		plan.RolePatchApplications[position], plan.RoleName,
+	)
 	return spec, err
 }
 
@@ -422,6 +422,51 @@ func TestEngineRuntimeCrossProfileVolumeVisibility(t *testing.T) {
 	require.Len(t, engine.VolumeMounts, 1)
 	assert.Equal(t, "b-vol", engine.VolumeMounts[0].Name)
 	assert.Equal(t, "/opt/b", engine.VolumeMounts[0].MountPath)
+}
+
+// TestEngineRuntimePatchPassOrder pins the KEP-531 D10 pass order at the one
+// point the discovery layer can observe it: with both patch passes failing,
+// the error of the pass that runs first surfaces — the profile-side pass
+// (stage 3) before the role-side pass (stage 4, last). renderResolvedPosition
+// mirrors the PodReconciler pipeline's pass order, so the surfaced
+// attribution pins that order.
+func TestEngineRuntimePatchPassOrder(t *testing.T) {
+	// Both sides collide with content the fragment pass already rendered:
+	// the role's legacy merge appended ROLE_ENV to the role-owned engine,
+	// which the profile-side patch re-adds, and the profile declares ROLE_X
+	// on its sidecar, which the role-side patch re-adds.
+	profile := makeProfile("ik", []workloadsv1alpha2.ContainerPatch{
+		envPatch("ROLE_ENV", "profile-side"),
+	})
+	profile.Spec.Containers = []v1.Container{
+		{Name: "runtime-sidecar", Env: []v1.EnvVar{{Name: "ROLE_X", Value: "profile"}}},
+		{Name: "engine"}, // declared so the legacy merge reaches the role-owned engine
+	}
+	role := leaderWorkerRole([]workloadsv1alpha2.EngineRuntime{{
+		ProfileName:     "ik",
+		Component:       leaderPos(),
+		PatchContainers: []string{"engine"},
+		Containers: []v1.Container{{
+			Name: "engine",
+			Env:  []v1.EnvVar{{Name: "ROLE_ENV", Value: "role"}},
+		}},
+		ContainerPatches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
+			roleJp("runtime-sidecar", "/env/-", v1.EnvVar{Name: "ROLE_X", Value: "role"}),
+		},
+	}})
+	plan, err, recorder := resolverHarness(
+		t, []*workloadsv1alpha2.ClusterEngineRuntimeProfile{profile}, role,
+	)
+	require.NoError(t, err)
+	assert.Empty(t, collectEvents(t, recorder))
+
+	template := *role.GetLeaderWorkerPattern().TemplateSource.Template
+	_, err = renderResolvedPosition(t, plan, leaderPos(), template)
+	require.Error(t, err)
+	// the profile-side pass ran first: its collision surfaces, not the
+	// role-side one
+	assert.Contains(t, err.Error(), `profile "ik" containerPatches[0]`)
+	assert.NotContains(t, err.Error(), `role "worker" engineRuntimes`)
 }
 
 // TestEngineRuntimeSplitDeliveryDanglingMount pins the KEP test-plan row
@@ -625,9 +670,9 @@ func envNames(c v1.Container) []string {
 // TestApplyRoleEngineRuntimePatches pins the KEP-531 application order — the
 // role-side containerPatches pass over the profile-declared init containers
 // and sidecars the fragment/legacy-merge pass rendered into the position,
-// before the profile-side pass. Errors attribute to the role's reference,
-// never the profile; a target the role's own template declares — a
-// spec.containers or spec.initContainers member — is a render error even
+// after the profile-side pass, last. Errors attribute to the role's
+// reference, never the profile; a target the role's own template declares —
+// a spec.containers or spec.initContainers member — is a render error even
 // though the profile declares the name too, because the rendered
 // same-named container is role-owned.
 func TestApplyRoleEngineRuntimePatches(t *testing.T) {
@@ -771,13 +816,19 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 		assert.Contains(t, err.Error(), `role "worker" engineRuntimes["ik"].containerPatches[0]`)
 	})
 
-	t.Run("role-side and profile-side patches both fire in application order", func(t *testing.T) {
-		// The profile declares a sidecar colliding with the role's own
-		// engine container, so the role's legacy containers entry merges its
-		// env into the role-owned engine — exercising the §6.3 shared
-		// env-name conflict check across the legacy merge and the
-		// profile-side patch pass.
-		profile := renderProfile()
+	t.Run("profile-side and role-side patches both fire in application order", func(t *testing.T) {
+		// KEP-531 D10: the profile-side pass applies before the role-side
+		// pass — what the role writes lands where it is written. The profile
+		// declares a sidecar colliding with the role's own engine container,
+		// so the role's legacy containers entry merges its env into the
+		// role-owned engine ahead of the profile-side patch. The
+		// profile-declared sidecar carries the profile's command and env, and
+		// the role-side pass — last — renders its /command/0 insert as the
+		// rendered command's index 0, ahead of anything the profile
+		// inserted, and appends env entries that may $(VAR)-reference
+		// profile-appended ones (the forward direction only).
+		profile := renderProfile(v1.EnvVar{Name: "PROF_X", Value: "profile"})
+		profile.Spec.Containers[0].Command = []string{"--sidecar-base"}
 		profile.Spec.Containers = append(profile.Spec.Containers, v1.Container{Name: "engine"})
 		fragment := EngineRuntimeFragment{
 			Profile: profile,
@@ -789,31 +840,44 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 				}},
 			},
 		}
+		profileEntries := []EngineRuntimePatch{{
+			ProfileName: "ik",
+			Targets:     []string{"engine"},
+			Patches: []workloadsv1alpha2.ContainerPatch{
+				jp("/command/0", "profile-wrap"),
+				envPatch("PROF_ENV", "profile-side"),
+			},
+		}}
 		roleEntries := []EngineRuntimeRolePatch{{
 			ProfileName: "ik",
 			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
-				roleJp("runtime-sidecar", "/env/-", v1.EnvVar{Name: "A", Value: "role-side"}),
+				roleJp("runtime-sidecar", "/command/0", "role-wrap"),
+				roleJp("runtime-sidecar", "/env/-", v1.EnvVar{Name: "ROLE_X", Value: "$(PROF_X)"}),
 			},
 		}}
 
 		spec := renderSpec()
 		roleContainerNames := roleContainers("engine") // captured before injection
 		InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{fragment})
+		require.NoError(t, ApplyEngineRuntimePatches(ctx, spec, roleContainerNames, profileEntries))
 		require.NoError(t, ApplyRoleEngineRuntimePatches(ctx, spec, roleContainerNames, nil, roleEntries, "worker"))
-		require.NoError(t, ApplyEngineRuntimePatches(ctx, spec, roleContainerNames, []EngineRuntimePatch{{
-			ProfileName: "ik",
-			Targets:     []string{"engine"},
-			Patches:     []workloadsv1alpha2.ContainerPatch{envPatch("PROF_ENV", "profile-side")},
-		}}))
 
-		// the role-side pass fired on the profile-declared sidecar...
-		sidecar := spec.Spec.Containers[1]
-		require.Len(t, sidecar.Env, 1)
-		assert.Equal(t, "A", sidecar.Env[0].Name)
-		// ...and the profile-side pass fired on the role-declared engine,
-		// seeing the env the legacy merge (role-side authored) appended
+		// the profile-side pass fired on the role-declared engine: its
+		// command insert landed and its env appends land behind the env the
+		// legacy merge (role-side authored) appended
 		engine := spec.Spec.Containers[0]
+		assert.Equal(t, []string{"profile-wrap", "python"}, engine.Command)
 		assert.Equal(t, []string{"PYTHONPATH", "ROLE_ENV", "PROF_ENV"}, envNames(engine))
+
+		// the role-side pass fired on the profile-declared sidecar, last:
+		// its /command/0 insert is the rendered command's index 0, ahead of
+		// anything the profile inserted, and its env appends may
+		// $(VAR)-reference profile-appended entries — the forward direction
+		sidecar := spec.Spec.Containers[1]
+		assert.Equal(t, []string{"role-wrap", "--sidecar-base"}, sidecar.Command)
+		require.Len(t, sidecar.Env, 2)
+		assert.Equal(t, []string{"PROF_X", "ROLE_X"}, envNames(sidecar))
+		assert.Equal(t, "$(PROF_X)", sidecar.Env[1].Value)
 
 		// a profile-side patch re-adding the role-side-merged env name
 		// errors with profile attribution
