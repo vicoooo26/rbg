@@ -6,6 +6,11 @@
 # RBG. The reference stays in the compatibility shape (profileName only,
 # no component, no patch fields), which is a valid state — a profile
 # gaining containerPatches cannot break a pre-existing reference.
+# D2 note: the absent-component default is pattern-dependent — this role
+# is standalonePattern, so it expands to the single implicit component and
+# the fragments deliver; under leaderWorkerPattern the same reference
+# would deliver to the leader only (main's published worker-side sidecar
+# skip).
 #
 # Expected: PYTHONPATH stays /usr/lib/python, no IK_SITE var, ik-sidecar present,
 # event reason UnaimedContainerPatch on RoleBasedGroup unaimed.

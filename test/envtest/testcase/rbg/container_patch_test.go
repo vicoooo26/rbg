@@ -258,7 +258,7 @@ var _ = Describe("RoleBasedGroup container patch injection", func() {
 		})
 		Expect(testutil.K8sClient.Create(testutil.Ctx, profile)).To(Succeed())
 		Expect(testutil.K8sClient.Create(testutil.Ctx, makeRBG("unaimed", []workloadsv1alpha2.EngineRuntime{{
-			ProfileName: "ik-unaimed", // no injectContainers
+			ProfileName: "ik-unaimed", // no patchContainers consent
 		}}))).To(Succeed())
 
 		Eventually(func(g Gomega) {
@@ -273,7 +273,7 @@ var _ = Describe("RoleBasedGroup container patch injection", func() {
 				To(BeTrue(), "expected the profile volume ik-unaimed-vol in the rendered pod spec")
 			// ...but the patch did not fire
 			_, added := envValue(c, "IK_SITE")
-			g.Expect(added).To(BeFalse(), "the patch must not fire without injectContainers")
+			g.Expect(added).To(BeFalse(), "the patch must not fire without patchContainers consent")
 			val, ok := envValue(c, "PYTHONPATH")
 			g.Expect(ok).To(BeTrue(), "PYTHONPATH env var not found")
 			g.Expect(val).To(Equal("/usr/lib/python"))
