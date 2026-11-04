@@ -1,0 +1,81 @@
+# Case 1 — full patch bundle renders into the child workload.
+#
+# Profile fragments: sidecar container + emptyDir volume.
+# The reference scopes the profile to the worker component and consents
+# patchContainers: [engine], so the profile's containerPatches fire at
+# the worker's engine container, in list order:
+#   /command/0 head-insert  -> command = [env, python, ...] (env exists in python:3.11-slim, pod still runs)
+#   /args/0 head-insert     -> args = [-u, -c, "import time; time.sleep(3600)"]
+#   /env/- append           -> IK_SITE = /opt/ik/site (a fresh name: add cannot join an existing env var)
+#   /volumeMounts/- append  -> ik-full-vol mounted at /opt/ik (readOnly)
+#   /securityContext/capabilities/add/- -> Add: [SYS_NICE]
+#
+# Expected: RoleInstanceSet kep531/full-verb-worker renders with all
+# patches applied in the worker component; the leader component renders
+# byte-identically to its own template (the component scope keeps the
+# fragments and the patches out of it); both pods become Running.
+apiVersion: workloads.x-k8s.io/v1alpha2
+kind: ClusterEngineRuntimeProfile
+metadata:
+  name: kep531-full
+spec:
+  updateStrategy: NoUpdate
+  containers:
+    - name: ik-sidecar
+      image: kube-ai-registry.cn-shanghai.cr.aliyuncs.com/kube-ai-dev/busybox:1.36
+      command: ["sleep", "3600"]
+  volumes:
+    - name: ik-full-vol
+      emptyDir: {}
+  containerPatches:
+    - jsonPatch:
+        op: add
+        path: /command/0
+        value: "env"
+    - jsonPatch:
+        op: add
+        path: /args/0
+        value: "-u"
+    - jsonPatch:
+        op: add
+        path: /env/-
+        value:
+          name: IK_SITE
+          value: /opt/ik/site
+    - jsonPatch:
+        op: add
+        path: /volumeMounts/-
+        value:
+          name: ik-full-vol
+          mountPath: /opt/ik
+          readOnly: true
+    - jsonPatch:
+        op: add
+        path: /securityContext/capabilities/add/-
+        value: SYS_NICE
+---
+apiVersion: workloads.x-k8s.io/v1alpha2
+kind: RoleBasedGroup
+metadata:
+  name: full-verb
+  namespace: kep531
+spec:
+  roles:
+    - name: worker
+      replicas: 1
+      leaderWorkerPattern:
+        size: 2
+        template:
+          spec:
+            containers:
+              - name: engine
+                image: kube-ai-registry.cn-shanghai.cr.aliyuncs.com/kube-ai-dev/python:3.11-slim
+                command: ["python"]
+                args: ["-c", "import time; time.sleep(3600)"]
+                env:
+                  - name: PYTHONPATH
+                    value: /usr/lib/python
+      engineRuntimes:
+        - profileName: kep531-full
+          component: worker
+          patchContainers: [engine]

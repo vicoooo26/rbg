@@ -1,0 +1,53 @@
+# Case 8 — patio (driver scenario 1): fragments only, leader component only.
+#
+# The profile contributes a sidecar container and a volume — pod-level
+# fragments, which need no container consent, so the reference carries no
+# patchContainers. component: leader scopes them to the leader
+# component: the leader template gains the sidecar and volume, the worker
+# template renders byte-identically. The profile declares no
+# containerPatches, so no warning event fires either.
+#
+# Expected render (RoleInstanceSet, one group of size 2):
+#   leader pod: two containers (engine, patio-agent) plus the patio-sock
+#               volume and the patio-agent mount; worker pod: engine only,
+#               no extra volume.
+# Expected startup: the patio-agent sidecar reaches Running in the leader
+#   pod and logs its server banner (Uvicorn on 0.0.0.0:9091); the worker
+#   pod has no patio container at all.
+apiVersion: workloads.x-k8s.io/v1alpha2
+kind: ClusterEngineRuntimeProfile
+metadata:
+  name: kep531-patio
+spec:
+  updateStrategy: NoUpdate
+  containers:
+    - name: patio-agent
+      image: kube-ai-registry.cn-shanghai.cr.aliyuncs.com/kube-ai-dev/inference-engine-runtime:c6bddfc
+      volumeMounts:
+        - name: patio-sock
+          mountPath: /tmp/patio-sock
+  volumes:
+    - name: patio-sock
+      emptyDir: {}
+---
+apiVersion: workloads.x-k8s.io/v1alpha2
+kind: RoleBasedGroup
+metadata:
+  name: patio
+  namespace: kep531
+spec:
+  roles:
+    - name: worker
+      replicas: 1
+      leaderWorkerPattern:
+        size: 2
+        template:
+          spec:
+            containers:
+              - name: engine
+                image: kube-ai-registry.cn-shanghai.cr.aliyuncs.com/kube-ai-dev/python:3.11-slim
+                command: ["python"]
+                args: ["-c", "import time; time.sleep(3600)"]
+      engineRuntimes:
+        - profileName: kep531-patio
+          component: leader

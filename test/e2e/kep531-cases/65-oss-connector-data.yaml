@@ -1,0 +1,114 @@
+# Case 6.5 — oss-connector, real data level (driver scenario 4, data tier).
+#
+# Prerequisites (environment-specific, not portable):
+#   * an OSS bucket holding a Qwen model, here oss://ik-models with
+#     Qwen/Qwen3.5-0.8B/ (config.json + one 1.7G safetensors shard);
+#   * a secret with the bucket's AK/SK, here default/oss-chubo with keys
+#     akId and akSecret, referenced via secretKeyRef — never plaintext.
+#
+# The profile is byte-identical to case 6's: initContainer unpacks the
+# connector library and config into a shared volume; patches mount it and
+# set LD_PRELOAD plus CONNECTOR_CONFIG_PATH on the engine container,
+# consented per component through patchContainers: [engine] (case 6's
+# reference shape — one component-scoped reference each for leader and
+# worker).
+# Everything real belongs to the role's own templates, per the
+# zero-workload-data rule: MODEL_DIR (the connector's virtual mount point —
+# it must NOT be a real OSS mount), OSS_PATH (with trailing slash),
+# OSS_ENDPOINT (protocol included; the internal endpoint from inside the
+# cluster), OSS_REGION, credentials via secretKeyRef, and the ENABLE_CONNECTOR
+# divergence: the leader (=1) reads real model bytes straight from OSS
+# through the connector and prints content hashes; the worker (=2) stays a
+# plain sleeper, since receiving from the master is the worker's data tier,
+# not this case's assertion.
+#
+# Expected render: as case 6 — both pods carry the injected volume,
+# initContainer, mount, LD_PRELOAD, CONNECTOR_CONFIG_PATH.
+# Expected startup + data: initContainer Completed; the leader's engine
+# prints sha256 of config.json and of the safetensors head/tail with fetch
+# timings, matching the object contents on OSS; the connector's logs record
+# the OSS fetches; the worker pod stays Running.
+apiVersion: workloads.x-k8s.io/v1alpha2
+kind: RoleBasedGroup
+metadata:
+  name: ossc-data
+  namespace: default
+spec:
+  roles:
+    - name: worker
+      replicas: 1
+      leaderWorkerPattern:
+        size: 2
+        template:
+          spec:
+            containers:
+              - name: engine
+                image: kube-ai-registry.cn-shanghai.cr.aliyuncs.com/kube-ai-dev/python:3.11-slim
+                command: ["python"]
+                args: ["-c", "import time; time.sleep(3600)"]
+                env:
+                  - name: MODEL_DIR
+                    value: /models
+                  - name: OSS_PATH
+                    value: oss://ik-models/Qwen/Qwen3.5-0.8B/
+                  - name: OSS_ENDPOINT
+                    value: http://oss-cn-shanghai-internal.aliyuncs.com
+                  - name: OSS_REGION
+                    value: cn-shanghai
+                  - name: OSS_ACCESS_KEY_ID
+                    valueFrom:
+                      secretKeyRef:
+                        name: oss-chubo
+                        key: akId
+                  - name: OSS_ACCESS_KEY_SECRET
+                    valueFrom:
+                      secretKeyRef:
+                        name: oss-chubo
+                        key: akSecret
+        leaderTemplatePatch:
+          spec:
+            containers:
+              - name: engine
+                env:
+                  - name: ENABLE_CONNECTOR
+                    value: "1"
+                command:
+                  - sh
+                  - -c
+                  - |
+                    mkdir -p /models
+                    # The connector master must stay in the entrypoint
+                    # process (its daemon threads own the UDS listener),
+                    # so python runs as a child instead of exec-ing over
+                    # sh; the library flips it to slave role via env.
+                    python -u - <<'PYEOF'
+                    import hashlib, time
+                    t = time.time()
+                    d = open("/models/config.json", "rb").read()
+                    print("CONFIG", len(d), hashlib.sha256(d).hexdigest(),
+                          "%.2fs" % (time.time() - t), flush=True)
+                    t = time.time()
+                    f = open("/models/model.safetensors-00001-of-00001.safetensors", "rb")
+                    head = f.read(16 * 1024 * 1024)
+                    f.seek(-16 * 1024 * 1024, 2)
+                    tail = f.read(16 * 1024 * 1024)
+                    f.close()
+                    print("WEIGHTS", hashlib.sha256(head).hexdigest(),
+                          hashlib.sha256(tail).hexdigest(),
+                          "%.2fs" % (time.time() - t), flush=True)
+                    import time as _t; _t.sleep(3600)
+                    PYEOF
+        workerTemplatePatch:
+          spec:
+            containers:
+              - name: engine
+                env:
+                  - name: ENABLE_CONNECTOR
+                    value: "2"
+      engineRuntimes:
+        - profileName: kep531-oss-connector
+          component: leader
+          patchContainers: [engine]
+        - profileName: kep531-oss-connector
+          component: worker
+          patchContainers: [engine]

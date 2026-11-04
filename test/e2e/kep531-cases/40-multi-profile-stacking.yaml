@@ -1,0 +1,88 @@
+# Case 4 — multi-profile stacking (determinism).
+#
+# Two profiles patch the same container of the same component; both
+# references scope to the worker component and consent
+# patchContainers: [engine], in engineRuntimes order [accel, tele].
+# (Two references may name the same component because they carry
+# different profileNames — D6 scope ownership applies per profile.)
+# Head-inserts stack with the LATER runtime landing LEFTMOST:
+#   env order = [TELE_SITE, ACCEL_SITE, PYTHONPATH(base)]
+# Both volumes mount in the worker pod; the leader component renders
+# byte-identically; both pods run.
+#
+# (JSONPatch `add` cannot join an existing env var, so stacking order is
+# shown by /env/0 head-inserts of distinct names instead of prefix joins.)
+apiVersion: workloads.x-k8s.io/v1alpha2
+kind: ClusterEngineRuntimeProfile
+metadata:
+  name: kep531-accel
+spec:
+  updateStrategy: NoUpdate
+  volumes:
+    - name: ik-accel-vol
+      emptyDir: {}
+  containerPatches:
+    - jsonPatch:
+        op: add
+        path: /volumeMounts/-
+        value:
+          name: ik-accel-vol
+          mountPath: /opt/accel
+    - jsonPatch:
+        op: add
+        path: /env/0
+        value:
+          name: ACCEL_SITE
+          value: /opt/accel
+---
+apiVersion: workloads.x-k8s.io/v1alpha2
+kind: ClusterEngineRuntimeProfile
+metadata:
+  name: kep531-tele
+spec:
+  updateStrategy: NoUpdate
+  volumes:
+    - name: ik-tele-vol
+      emptyDir: {}
+  containerPatches:
+    - jsonPatch:
+        op: add
+        path: /volumeMounts/-
+        value:
+          name: ik-tele-vol
+          mountPath: /opt/tele
+    - jsonPatch:
+        op: add
+        path: /env/0
+        value:
+          name: TELE_SITE
+          value: /opt/tele
+---
+apiVersion: workloads.x-k8s.io/v1alpha2
+kind: RoleBasedGroup
+metadata:
+  name: stacked
+  namespace: kep531
+spec:
+  roles:
+    - name: worker
+      replicas: 1
+      leaderWorkerPattern:
+        size: 2
+        template:
+          spec:
+            containers:
+              - name: engine
+                image: kube-ai-registry.cn-shanghai.cr.aliyuncs.com/kube-ai-dev/python:3.11-slim
+                command: ["python"]
+                args: ["-c", "import time; time.sleep(3600)"]
+                env:
+                  - name: PYTHONPATH
+                    value: /usr/lib/python
+      engineRuntimes:
+        - profileName: kep531-accel
+          component: worker
+          patchContainers: [engine]
+        - profileName: kep531-tele
+          component: worker
+          patchContainers: [engine]

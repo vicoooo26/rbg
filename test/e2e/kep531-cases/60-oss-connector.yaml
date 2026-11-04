@@ -1,0 +1,123 @@
+# Case 6 — oss-connector (driver scenario 4): transport profile, broadcast,
+# role-owned divergent values.
+#
+# One leaderWorkerPattern role references the profile twice, once per
+# component (D1); the profile carries only the component-independent
+# mechanism:
+#   initContainer delivers the connector's interposition library and its
+#   config into a shared volume at the fixed path /opt/ossc — the library
+#   needs only glibc, so any Linux x86-64 engine image can load it;
+#   containerPatches mount the volume, point CONNECTOR_CONFIG_PATH at the
+#   copied config, and set LD_PRELOAD; each component-scoped reference
+#   consents patchContainers: [engine], so the mount and the patches fire
+#   in both the leader and the worker component.
+# Everything divergent stays in the role's own templates, per the
+# zero-workload-data rule: ENABLE_CONNECTOR is 1 in leaderTemplatePatch
+# (master loads from OSS and distributes) and 2 in workerTemplatePatch
+# (receives from the master); MODEL_DIR, OSS_PATH, OSS_ENDPOINT, and
+# OSS_REGION are startup-level placeholders here — the connector's launch
+# validation requires all four, but without credentials it loads and
+# stays inert, so this case asserts render and startup only, never real
+# OSS data. Without MODEL_DIR the connector aborts the host process at
+# launch ("failed to launch oss connector: MODEL_DIR not set"), so the
+# placeholders keep the library attached and the engine alive without
+# touching any bucket.
+#
+# Expected render (RoleInstanceSet, one group of size 2):
+#   leader pod: initContainer oss-connector-install Completed; engine
+#               container runs with LD_PRELOAD=/opt/ossc/lib64/
+#               libossc_preload.so, CONNECTOR_CONFIG_PATH=/opt/ossc/
+#               config.json, and ENABLE_CONNECTOR=1
+#   worker pod: same library mount and LD_PRELOAD with ENABLE_CONNECTOR=2
+#   neither pod declares the volume or the mount itself — the profile
+#   is their only source
+apiVersion: workloads.x-k8s.io/v1alpha2
+kind: ClusterEngineRuntimeProfile
+metadata:
+  name: kep531-oss-connector
+spec:
+  updateStrategy: NoUpdate
+  volumes:
+    - name: oss-connector-lib
+      emptyDir: {}
+  initContainers:
+    - name: oss-connector-install
+      image: kube-ai-registry.cn-shanghai.cr.aliyuncs.com/kube-ai-dev/oss-connector:1.2.0
+      command:
+        [
+          "sh",
+          "-c",
+          "mkdir -p /opt/ossc/lib64 && cp /usr/local/lib/libossc_preload.so /opt/ossc/lib64/ && cp /etc/oss-connector/config.json /opt/ossc/config.json",
+        ]
+      volumeMounts:
+        - name: oss-connector-lib
+          mountPath: /opt/ossc
+  containerPatches:
+    - jsonPatch:
+        op: add
+        path: /volumeMounts/-
+        value:
+          name: oss-connector-lib
+          mountPath: /opt/ossc
+          readOnly: true
+    - jsonPatch:
+        op: add
+        path: /env/-
+        value:
+          name: LD_PRELOAD
+          value: /opt/ossc/lib64/libossc_preload.so
+    - jsonPatch:
+        op: add
+        path: /env/-
+        value:
+          name: CONNECTOR_CONFIG_PATH
+          value: /opt/ossc/config.json
+---
+apiVersion: workloads.x-k8s.io/v1alpha2
+kind: RoleBasedGroup
+metadata:
+  name: ossc
+  namespace: kep531
+spec:
+  roles:
+    - name: worker
+      replicas: 1
+      leaderWorkerPattern:
+        size: 2
+        template:
+          spec:
+            containers:
+              - name: engine
+                image: kube-ai-registry.cn-shanghai.cr.aliyuncs.com/kube-ai-dev/sglang:v0.5.21
+                command: ["python"]
+                args: ["-c", "import time; time.sleep(3600)"]
+                env:
+                  - name: MODEL_DIR
+                    value: /tmp/models
+                  - name: OSS_PATH
+                    value: oss://placeholder-bucket/placeholder
+                  - name: OSS_ENDPOINT
+                    value: oss-cn-shanghai.aliyuncs.com
+                  - name: OSS_REGION
+                    value: cn-shanghai
+        leaderTemplatePatch:
+          spec:
+            containers:
+              - name: engine
+                env:
+                  - name: ENABLE_CONNECTOR
+                    value: "1"
+        workerTemplatePatch:
+          spec:
+            containers:
+              - name: engine
+                env:
+                  - name: ENABLE_CONNECTOR
+                    value: "2"
+      engineRuntimes:
+        - profileName: kep531-oss-connector
+          component: leader
+          patchContainers: [engine]
+        - profileName: kep531-oss-connector
+          component: worker
+          patchContainers: [engine]

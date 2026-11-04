@@ -1,0 +1,48 @@
+# Case 3 — render failure (fail-loud).
+#
+# The reference scopes the profile to the worker component and consents
+# patchContainers: [ghost], but the worker component's rendered template
+# declares no container named "ghost" — a patch address must name a
+# container the role itself declares. Render fails: NO child workload is
+# created and an EngineRuntimeRenderFailed warning event is recorded on
+# the RBG.
+#
+# Expected: kubectl get roleinstancesets -n kep531 shows no broken-worker;
+# event reason EngineRuntimeRenderFailed on RoleBasedGroup broken;
+# RBG status conditions carry the render error.
+apiVersion: workloads.x-k8s.io/v1alpha2
+kind: ClusterEngineRuntimeProfile
+metadata:
+  name: kep531-broken
+spec:
+  updateStrategy: NoUpdate
+  containerPatches:
+    - jsonPatch:
+        op: add
+        path: /env/-
+        value:
+          name: IK_SITE
+          value: /opt/ik/site
+---
+apiVersion: workloads.x-k8s.io/v1alpha2
+kind: RoleBasedGroup
+metadata:
+  name: broken
+  namespace: kep531
+spec:
+  roles:
+    - name: worker
+      replicas: 1
+      leaderWorkerPattern:
+        size: 2
+        template:
+          spec:
+            containers:
+              - name: engine
+                image: kube-ai-registry.cn-shanghai.cr.aliyuncs.com/kube-ai-dev/python:3.11-slim
+                command: ["python"]
+                args: ["-c", "import time; time.sleep(3600)"]
+      engineRuntimes:
+        - profileName: kep531-broken
+          component: worker
+          patchContainers: [ghost]

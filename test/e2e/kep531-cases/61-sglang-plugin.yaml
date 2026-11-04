@@ -1,0 +1,95 @@
+# Case 6.1 — sglang plugin (driver scenario 2): broadcast, fragments + patches.
+#
+# The profile carries the whole delivery mechanism. The plugin ships as a
+# pure-Python wheel (entry-point group sglang.srt.plugins): an image volume
+# exposes the carrier image's /wheel to an initContainer, which pip-installs
+# it into a shared emptyDir; containerPatches mount that directory and set
+# PYTHONPATH. The role references the profile once per component (D1),
+# each reference consenting patchContainers: [engine], so the mount and
+# the patches fire in both the leader and the worker component. Importing
+# the plugin is the engine scheduler's business at startup, not the
+# profile's — the engine finds it through entry-point metadata resolved
+# along PYTHONPATH.
+# The role's only own data is the plugin's A/B gate env, SGLANG_VIT_CROSS_REQ_BATCH.
+#
+# Expected render (RoleInstanceSet, one group of size 2):
+#   both pods gain the sglang-plugins and sglang-vit-wheel volumes, the
+#   install initContainer, the /plugins mount, and PYTHONPATH=/plugins on
+#   the engine container; neither pod declares any of them itself.
+# Expected startup: initContainer Completed; importlib.metadata in the
+#   engine container lists vit_cross_request_batch in the
+#   sglang.srt.plugins group, resolved through the mounted wheel.
+apiVersion: workloads.x-k8s.io/v1alpha2
+kind: ClusterEngineRuntimeProfile
+metadata:
+  name: kep531-sglang-plugin
+spec:
+  updateStrategy: NoUpdate
+  volumes:
+    - name: sglang-plugins
+      emptyDir: {}
+    - name: sglang-vit-wheel
+      image:
+        reference: kube-ai-registry.cn-shanghai.cr.aliyuncs.com/kube-ai-dev/sglang-vit-batch-plugin:0.1.0
+        pullPolicy: IfNotPresent
+  initContainers:
+    - name: sglang-plugin-install
+      image: kube-ai-registry.cn-shanghai.cr.aliyuncs.com/kube-ai-dev/python:3.11-slim
+      command:
+        [
+          "pip",
+          "install",
+          "--no-deps",
+          "-t",
+          "/plugins",
+          "/carrier/wheel/sglang_vit_batch_plugin-0.1.0-py3-none-any.whl",
+        ]
+      volumeMounts:
+        - name: sglang-plugins
+          mountPath: /plugins
+        - name: sglang-vit-wheel
+          mountPath: /carrier
+          readOnly: true
+  containerPatches:
+    - jsonPatch:
+        op: add
+        path: /volumeMounts/-
+        value:
+          name: sglang-plugins
+          mountPath: /plugins
+          readOnly: true
+    - jsonPatch:
+        op: add
+        path: /env/-
+        value:
+          name: PYTHONPATH
+          value: /plugins
+---
+apiVersion: workloads.x-k8s.io/v1alpha2
+kind: RoleBasedGroup
+metadata:
+  name: vit
+  namespace: kep531
+spec:
+  roles:
+    - name: worker
+      replicas: 1
+      leaderWorkerPattern:
+        size: 2
+        template:
+          spec:
+            containers:
+              - name: engine
+                image: kube-ai-registry.cn-shanghai.cr.aliyuncs.com/kube-ai-dev/sglang:v0.5.21
+                command: ["python"]
+                args: ["-c", "import time; time.sleep(3600)"]
+                env:
+                  - name: SGLANG_VIT_CROSS_REQ_BATCH
+                    value: "1"
+      engineRuntimes:
+        - profileName: kep531-sglang-plugin
+          component: leader
+          patchContainers: [engine]
+        - profileName: kep531-sglang-plugin
+          component: worker
+          patchContainers: [engine]
