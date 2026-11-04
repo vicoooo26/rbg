@@ -122,7 +122,7 @@ func (r *PodReconciler) ConstructPodTemplateSpecApplyConfiguration(
 			return nil, fmt.Errorf("failed to inject config: %w", err)
 		}
 	}
-	var roleContainerNames, roleInitContainerNames map[string]struct{}
+	var roleContainerNames, roleInitContainerNames, roleVolumeNames map[string]struct{}
 	if r.engineRuntimePlan != nil {
 		if r.engineRuntimePosition == "" {
 			return nil, fmt.Errorf("engine runtime plan is set but the template's position is not")
@@ -144,12 +144,14 @@ func (r *PodReconciler) ConstructPodTemplateSpecApplyConfiguration(
 			}
 			return nil, err
 		}
-		// The role's own container names, captured before any injection,
-		// are the sole targeting boundary for profile-side container
-		// patches (profile-injected containers and role-declared
-		// initContainers are never addressable). The role-declared init
-		// container names join them only for the role-side pass's
-		// ownership check.
+		// The role-declared container names, captured before any injection,
+		// are the sole targeting boundary for profile-side patches:
+		// profile-injected containers are never addressable. Role-side
+		// targets additionally resolve to role-declared init containers and
+		// this reference's profile-declared containers (D8). The
+		// role-declared volume names snapshot enforces D9 for those
+		// profile-declared targets: a role-side patch may not mount one into
+		// them — the one-way principle.
 		roleContainerNames = make(map[string]struct{}, len(podTemplateSpec.Spec.Containers))
 		for _, c := range podTemplateSpec.Spec.Containers {
 			roleContainerNames[c.Name] = struct{}{}
@@ -157,6 +159,10 @@ func (r *PodReconciler) ConstructPodTemplateSpecApplyConfiguration(
 		roleInitContainerNames = make(map[string]struct{}, len(podTemplateSpec.Spec.InitContainers))
 		for _, c := range podTemplateSpec.Spec.InitContainers {
 			roleInitContainerNames[c.Name] = struct{}{}
+		}
+		roleVolumeNames = make(map[string]struct{}, len(podTemplateSpec.Spec.Volumes))
+		for _, vol := range podTemplateSpec.Spec.Volumes {
+			roleVolumeNames[vol.Name] = struct{}{}
 		}
 		discovery.InjectEngineRuntimeFragments(
 			ctx, &podTemplateSpec,
@@ -191,7 +197,7 @@ func (r *PodReconciler) ConstructPodTemplateSpecApplyConfiguration(
 		// KEP-531 application order: the role-side containerPatches pass
 		// applies last — what the role writes lands where it is written.
 		if err := discovery.ApplyRoleEngineRuntimePatches(
-			ctx, &podTemplateSpec, roleContainerNames, roleInitContainerNames,
+			ctx, &podTemplateSpec, roleContainerNames, roleInitContainerNames, roleVolumeNames,
 			r.engineRuntimePlan.RolePatchApplications[r.engineRuntimePosition],
 			r.engineRuntimePlan.RoleName,
 		); err != nil {

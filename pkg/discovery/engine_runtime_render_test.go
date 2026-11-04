@@ -357,10 +357,10 @@ func volumeNamesOf(spec *v1.PodTemplateSpec) []string {
 }
 
 // renderResolvedPosition runs the PodReconciler render flow for one position:
-// the role's own container and init container names captured before any
-// injection, then the fragment pass, then the profile-side patch pass, then
-// the role-side patch pass — the KEP-531 application order, role-side last —
-// over a copy of the position's role-declared template.
+// the role's own container, init container and volume names captured before
+// any injection, then the fragment pass, then the profile-side patch pass,
+// then the role-side patch pass — the KEP-531 application order, role-side
+// last — over a copy of the position's role-declared template.
 func renderResolvedPosition(
 	t *testing.T,
 	plan *EngineRuntimePlan,
@@ -377,6 +377,10 @@ func renderResolvedPosition(
 	for _, c := range spec.Spec.InitContainers {
 		roleInitContainerNames[c.Name] = struct{}{}
 	}
+	roleVolumeNames := make(map[string]struct{}, len(spec.Spec.Volumes))
+	for _, vol := range spec.Spec.Volumes {
+		roleVolumeNames[vol.Name] = struct{}{}
+	}
 	ctx := context.Background()
 	InjectEngineRuntimeFragments(ctx, spec, plan.FragmentApplications[position])
 	if err := ApplyEngineRuntimePatches(
@@ -384,7 +388,7 @@ func renderResolvedPosition(
 		return spec, err
 	}
 	err := ApplyRoleEngineRuntimePatches(
-		ctx, spec, roleContainerNames, roleInitContainerNames,
+		ctx, spec, roleContainerNames, roleInitContainerNames, roleVolumeNames,
 		plan.RolePatchApplications[position], plan.RoleName,
 	)
 	return spec, err
@@ -754,7 +758,7 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 			Runtime: workloadsv1alpha2.EngineRuntime{ProfileName: "ik"},
 		}})
 
-		require.NoError(t, ApplyRoleEngineRuntimePatches(ctx, spec, roleContainerNames, nil, []EngineRuntimeRolePatch{{
+		require.NoError(t, ApplyRoleEngineRuntimePatches(ctx, spec, roleContainerNames, nil, nil, []EngineRuntimeRolePatch{{
 			ProfileName:        "ik",
 			DeclaredContainers: declaredContainersOf(profile),
 			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
@@ -780,7 +784,7 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 		spec := renderSpec()
 		roleContainerNames := roleContainers("engine") // captured before injection
 
-		require.NoError(t, ApplyRoleEngineRuntimePatches(ctx, spec, roleContainerNames, nil, []EngineRuntimeRolePatch{{
+		require.NoError(t, ApplyRoleEngineRuntimePatches(ctx, spec, roleContainerNames, nil, nil, []EngineRuntimeRolePatch{{
 			ProfileName:        "ik",
 			DeclaredContainers: map[string]struct{}{}, // the profile declares nothing
 			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
@@ -802,7 +806,7 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 		roleContainerNames := roleContainers("engine")
 		roleInitContainerNames := roleContainers("role-init")
 
-		require.NoError(t, ApplyRoleEngineRuntimePatches(ctx, spec, roleContainerNames, roleInitContainerNames, []EngineRuntimeRolePatch{{
+		require.NoError(t, ApplyRoleEngineRuntimePatches(ctx, spec, roleContainerNames, roleInitContainerNames, nil, []EngineRuntimeRolePatch{{
 			ProfileName:        "ik",
 			DeclaredContainers: map[string]struct{}{},
 			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
@@ -829,7 +833,7 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 		require.Len(t, spec.Spec.Containers, 2)
 		assert.Equal(t, "sglang:latest", spec.Spec.Containers[0].Image)
 
-		require.NoError(t, ApplyRoleEngineRuntimePatches(ctx, spec, roleContainerNames, nil, []EngineRuntimeRolePatch{{
+		require.NoError(t, ApplyRoleEngineRuntimePatches(ctx, spec, roleContainerNames, nil, nil, []EngineRuntimeRolePatch{{
 			ProfileName:        "ik",
 			DeclaredContainers: declaredContainersOf(profile),
 			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
@@ -864,7 +868,7 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 		require.Len(t, spec.Spec.InitContainers, 1)
 		assert.Equal(t, "role-init:latest", spec.Spec.InitContainers[0].Image)
 
-		require.NoError(t, ApplyRoleEngineRuntimePatches(ctx, spec, roleContainerNames, roleInitContainerNames, []EngineRuntimeRolePatch{{
+		require.NoError(t, ApplyRoleEngineRuntimePatches(ctx, spec, roleContainerNames, roleInitContainerNames, nil, []EngineRuntimeRolePatch{{
 			ProfileName:        "ik",
 			DeclaredContainers: declaredContainersOf(profile),
 			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
@@ -895,7 +899,7 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 		}})
 		require.Len(t, spec.Spec.Containers[1].Env, 2) // the legacy merge landed
 
-		err := ApplyRoleEngineRuntimePatches(ctx, spec, roleContainers("engine"), nil, []EngineRuntimeRolePatch{{
+		err := ApplyRoleEngineRuntimePatches(ctx, spec, roleContainers("engine"), nil, nil, []EngineRuntimeRolePatch{{
 			ProfileName:        "ik",
 			DeclaredContainers: declaredContainersOf(profile),
 			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
@@ -911,7 +915,7 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 		// the name is inside this reference's declared vocabulary, but the
 		// position never rendered it (here: no fragment pass ran)
 		spec := renderSpec()
-		err := ApplyRoleEngineRuntimePatches(ctx, spec, roleContainers("engine"), nil, []EngineRuntimeRolePatch{{
+		err := ApplyRoleEngineRuntimePatches(ctx, spec, roleContainers("engine"), nil, nil, []EngineRuntimeRolePatch{{
 			ProfileName:        "ik",
 			DeclaredContainers: declaredContainersOf(renderProfile()),
 			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
@@ -942,7 +946,7 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 		require.NotNil(t, findRenderedContainer(spec, "other-sidecar"))
 
 		// ...but is not addressable by this reference's patches
-		err := ApplyRoleEngineRuntimePatches(ctx, spec, roleContainers("engine"), nil, []EngineRuntimeRolePatch{{
+		err := ApplyRoleEngineRuntimePatches(ctx, spec, roleContainers("engine"), nil, nil, []EngineRuntimeRolePatch{{
 			ProfileName:        "ik",
 			DeclaredContainers: declaredContainersOf(profile),
 			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
@@ -1002,7 +1006,7 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 		roleContainerNames := roleContainers("engine") // captured before injection
 		InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{fragment})
 		require.NoError(t, ApplyEngineRuntimePatches(ctx, spec, roleContainerNames, profileEntries))
-		require.NoError(t, ApplyRoleEngineRuntimePatches(ctx, spec, roleContainerNames, nil, roleEntries, "worker"))
+		require.NoError(t, ApplyRoleEngineRuntimePatches(ctx, spec, roleContainerNames, nil, nil, roleEntries, "worker"))
 
 		// the profile-side pass fired on the role-declared engine: its
 		// command insert landed and its env appends land behind the env the
@@ -1031,5 +1035,144 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), `profile "ik" containerPatches[0]`)
 		assert.Contains(t, err.Error(), "add cannot join values")
+	})
+}
+
+// TestApplyRoleEngineRuntimePatchesOneWay pins the KEP-531 D9 one-way
+// content flow: a role-side patch may not mount a role-declared volume
+// into, or inject a consuming-namespace secretKeyRef/configMapKeyRef env
+// value into, a profile-declared container — render error. Role-declared
+// containers may consume both sides' content, and fieldRef,
+// resourceFieldRef and plain env values breach no one-way bound.
+func TestApplyRoleEngineRuntimePatchesOneWay(t *testing.T) {
+	ctx := context.Background()
+
+	// roleVolumeNames snapshots the role-declared pod volumes the way the
+	// reconciler does, before any fragment injection.
+	roleVolumeNames := map[string]struct{}{"role-vol": {}}
+	roleVol := v1.Volume{
+		Name:         "role-vol",
+		VolumeSource: v1.VolumeSource{EmptyDir: &v1.EmptyDirVolumeSource{}},
+	}
+	secretRefEnv := v1.EnvVar{Name: "TOKEN", ValueFrom: &v1.EnvVarSource{
+		SecretKeyRef: &v1.SecretKeySelector{
+			LocalObjectReference: v1.LocalObjectReference{Name: "role-secret"}, Key: "token",
+		},
+	}}
+	configMapRefEnv := v1.EnvVar{Name: "SITE", ValueFrom: &v1.EnvVarSource{
+		ConfigMapKeyRef: &v1.ConfigMapKeySelector{
+			LocalObjectReference: v1.LocalObjectReference{Name: "role-cm"}, Key: "site",
+		},
+	}}
+
+	// renderedWithProfile returns a fresh spec carrying the role-declared
+	// volume plus the ik profile's declared init container and sidecar.
+	renderedWithProfile := func() *v1.PodTemplateSpec {
+		spec := renderSpec()
+		spec.Spec.Volumes = []v1.Volume{roleVol}
+		profile := declaringProfile("ik")
+		InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
+			Profile: profile,
+			Runtime: workloadsv1alpha2.EngineRuntime{ProfileName: "ik"},
+		}})
+		return spec
+	}
+
+	t.Run("a role-declared volume mounted into a profile-declared container is a render error", func(t *testing.T) {
+		spec := renderedWithProfile()
+		err := ApplyRoleEngineRuntimePatches(ctx, spec, roleContainers("engine"), nil, roleVolumeNames, []EngineRuntimeRolePatch{{
+			ProfileName:        "ik",
+			DeclaredContainers: declaredContainersOf(declaringProfile("ik")),
+			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
+				roleJp("runtime-sidecar", "/volumeMounts/-", v1.VolumeMount{Name: "role-vol", MountPath: "/data"}),
+			},
+		}}, "worker")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `role "worker" engineRuntimes["ik"].containerPatches[0]`)
+		assert.Contains(t, err.Error(), "violates the one-way principle")
+		assert.Contains(t, err.Error(), `"role-vol"`)
+		// the profile-declared sidecar gained nothing
+		sidecar := findRenderedContainer(spec, "runtime-sidecar")
+		require.NotNil(t, sidecar)
+		assert.Empty(t, sidecar.VolumeMounts)
+	})
+
+	t.Run("a secretKeyRef env value into a profile-declared container is a render error", func(t *testing.T) {
+		spec := renderedWithProfile()
+		err := ApplyRoleEngineRuntimePatches(ctx, spec, roleContainers("engine"), nil, roleVolumeNames, []EngineRuntimeRolePatch{{
+			ProfileName:        "ik",
+			DeclaredContainers: declaredContainersOf(declaringProfile("ik")),
+			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
+				roleJp("runtime-sidecar", "/env/-", secretRefEnv),
+			},
+		}}, "worker")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `role "worker" engineRuntimes["ik"].containerPatches[0]`)
+		assert.Contains(t, err.Error(), "violates the one-way principle")
+		assert.Contains(t, err.Error(), `"TOKEN"`)
+		// the profile-declared sidecar gained nothing
+		sidecar := findRenderedContainer(spec, "runtime-sidecar")
+		require.NotNil(t, sidecar)
+		assert.Empty(t, sidecar.Env)
+	})
+
+	t.Run("a configMapKeyRef env value into a profile-declared container is a render error", func(t *testing.T) {
+		spec := renderedWithProfile()
+		err := ApplyRoleEngineRuntimePatches(ctx, spec, roleContainers("engine"), nil, roleVolumeNames, []EngineRuntimeRolePatch{{
+			ProfileName:        "ik",
+			DeclaredContainers: declaredContainersOf(declaringProfile("ik")),
+			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
+				roleJp("runtime-sidecar", "/env/-", configMapRefEnv),
+			},
+		}}, "worker")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `role "worker" engineRuntimes["ik"].containerPatches[0]`)
+		assert.Contains(t, err.Error(), "violates the one-way principle")
+		// the profile-declared sidecar gained nothing
+		sidecar := findRenderedContainer(spec, "runtime-sidecar")
+		require.NotNil(t, sidecar)
+		assert.Empty(t, sidecar.Env)
+	})
+
+	t.Run("fieldRef, resourceFieldRef and plain env values into a profile-declared container stay legal", func(t *testing.T) {
+		// only secret/configMap references are refused: a fieldRef reads the
+		// pod's own metadata, a resourceFieldRef the container's own
+		// resources, and a plain value nothing at all
+		spec := renderedWithProfile()
+		require.NoError(t, ApplyRoleEngineRuntimePatches(ctx, spec, roleContainers("engine"), nil, roleVolumeNames, []EngineRuntimeRolePatch{{
+			ProfileName:        "ik",
+			DeclaredContainers: declaredContainersOf(declaringProfile("ik")),
+			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
+				roleJp("runtime-sidecar", "/env/-", v1.EnvVar{Name: "POD_NAME", ValueFrom: &v1.EnvVarSource{
+					FieldRef: &v1.ObjectFieldSelector{FieldPath: "metadata.name"},
+				}}),
+				roleJp("runtime-sidecar", "/env/-", v1.EnvVar{Name: "CPU_REQ", ValueFrom: &v1.EnvVarSource{
+					ResourceFieldRef: &v1.ResourceFieldSelector{Resource: "requests.cpu"},
+				}}),
+				roleJp("runtime-sidecar", "/env/-", v1.EnvVar{Name: "PLAIN", Value: "x"}),
+			},
+		}}, "worker"))
+		sidecar := findRenderedContainer(spec, "runtime-sidecar")
+		require.NotNil(t, sidecar)
+		assert.Equal(t, []string{"POD_NAME", "CPU_REQ", "PLAIN"}, envNames(*sidecar))
+	})
+
+	t.Run("the same volume mount and secret env into a role-declared container is legal", func(t *testing.T) {
+		// D9's converse: role-declared containers may consume both sides'
+		// content — the role's own volumes and consuming-namespace secrets
+		// included
+		spec := renderedWithProfile()
+		require.NoError(t, ApplyRoleEngineRuntimePatches(ctx, spec, roleContainers("engine"), nil, roleVolumeNames, []EngineRuntimeRolePatch{{
+			ProfileName:        "ik",
+			DeclaredContainers: map[string]struct{}{}, // the target is role-declared
+			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
+				roleJp("engine", "/volumeMounts/-", v1.VolumeMount{Name: "role-vol", MountPath: "/data"}),
+				roleJp("engine", "/env/-", secretRefEnv),
+			},
+		}}, "worker"))
+		engine := spec.Spec.Containers[0]
+		require.Len(t, engine.VolumeMounts, 1)
+		assert.Equal(t, "role-vol", engine.VolumeMounts[0].Name)
+		assert.Equal(t, []string{"PYTHONPATH", "TOKEN"}, envNames(engine))
 	})
 }

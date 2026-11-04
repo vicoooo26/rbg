@@ -143,7 +143,7 @@ func ApplyContainerPatch(
 			)
 		}
 		for i, rule := range patches {
-			if err := applyJSONPatch(logger, container, *rule.JSONPatch, volumeNames, source, target, i); err != nil {
+			if err := applyJSONPatch(logger, container, *rule.JSONPatch, volumeNames, nil, source, target, i); err != nil {
 				return err
 			}
 		}
@@ -180,13 +180,18 @@ func ApplyEngineRuntimePatches(
 // captured by the caller before any profile fragment injection plus the
 // container names this reference's own profile declares; anything else — a
 // name injected only by a different reference or profile — is a render
-// error. roleContainerNames and roleInitContainerNames hold the names the
-// role's own template declared (spec.containers and spec.initContainers).
+// error. roleContainerNames, roleInitContainerNames and roleVolumeNames hold
+// the names the role's own template declared (spec.containers,
+// spec.initContainers and spec.volumes). When a patch's resolved target is
+// profile-declared, the pass enforces the D9 one-way principle on that
+// patch's decoded value: only the role consumes the profile's content, never
+// the converse, so a cluster-scoped profile stays self-contained.
 func ApplyRoleEngineRuntimePatches(
 	ctx context.Context,
 	podSpec *v1.PodTemplateSpec,
 	roleContainerNames map[string]struct{},
 	roleInitContainerNames map[string]struct{},
+	roleVolumeNames map[string]struct{},
 	entries []EngineRuntimeRolePatch,
 	roleName string,
 ) error {
@@ -198,19 +203,36 @@ func ApplyRoleEngineRuntimePatches(
 	for _, entry := range entries {
 		source := rolePatchSource(roleName, entry.ProfileName)
 		for i, patch := range entry.Patches {
-			container, err := resolveRolePatchTarget(
+			container, profileDeclared, err := resolveRolePatchTarget(
 				podSpec, roleContainerNames, roleInitContainerNames, entry.DeclaredContainers,
 				source, i, patch.Container,
 			)
 			if err != nil {
 				return err
 			}
-			if err := applyJSONPatch(logger, container, *patch.JSONPatch, volumeNames, source, patch.Container, i); err != nil {
+			// The one-way guard is per-target: a role-owned target may
+			// consume both sides' content, so it enforces nothing.
+			var oneWay *oneWayGuard
+			if profileDeclared {
+				oneWay = &oneWayGuard{roleVolumeNames: roleVolumeNames}
+			}
+			if err := applyJSONPatch(logger, container, *patch.JSONPatch, volumeNames, oneWay, source, patch.Container, i); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// oneWayGuard carries the KEP-531 D9 ownership boundary for a role-side
+// patch aimed at a profile-declared container: it refuses mounts of
+// role-declared volumes and consuming-namespace secretKeyRef/configMapKeyRef
+// env values, so no role content ever lands in a publisher-controlled
+// container. A nil guard — a role-owned target, or the profile-side pass,
+// whose values reach only role-declared containers by construction —
+// enforces nothing.
+type oneWayGuard struct {
+	roleVolumeNames map[string]struct{}
 }
 
 // resolveRolePatchTarget resolves one role-side patch target to its rendered
@@ -222,7 +244,10 @@ func ApplyRoleEngineRuntimePatches(
 // located by name in the rendered pod — init containers included,
 // profile-declared targets span both lists; (4) anything else is a render
 // error. A name the role's own template also declares resolves to the
-// role-owned container — the same precedence injection applies.
+// role-owned container — the same precedence injection applies. The second
+// return value reports whether the resolved target is profile-declared —
+// the trigger for the D9 one-way checks, which a role-owned target never
+// trips.
 func resolveRolePatchTarget(
 	podSpec *v1.PodTemplateSpec,
 	roleContainerNames map[string]struct{},
@@ -231,27 +256,27 @@ func resolveRolePatchTarget(
 	source patchSource,
 	idx int,
 	name string,
-) (*v1.Container, error) {
+) (*v1.Container, bool, error) {
 	if _, ok := roleContainerNames[name]; ok {
 		if container := findRenderedContainer(podSpec, name); container != nil {
-			return container, nil
+			return container, false, nil
 		}
 	}
 	if _, ok := roleInitContainerNames[name]; ok {
 		if container := findRenderedInitContainer(podSpec, name); container != nil {
-			return container, nil
+			return container, false, nil
 		}
 	}
 	if _, ok := declaredContainers[name]; ok {
 		container := findRenderedProfileContainer(podSpec, name)
 		if container == nil {
-			return nil, fmt.Errorf(
+			return nil, false, fmt.Errorf(
 				"%s[%d] targets container %q, which is not present in the rendered spec",
 				source.describe(), idx, name)
 		}
-		return container, nil
+		return container, true, nil
 	}
-	return nil, fmt.Errorf(
+	return nil, false, fmt.Errorf(
 		"%s[%d] targets container %q, which is neither role-declared nor declared by the profile",
 		source.describe(), idx, name)
 }
@@ -284,12 +309,17 @@ func findRenderedProfileContainer(podSpec *v1.PodTemplateSpec, name string) *v1.
 // checks run against the container's current state, which by construction
 // contains only the mutations of earlier rules — so a violation fires only
 // when the patch introduces it, never for a duplicate the role itself
-// declared.
+// declared. A non-nil oneWay guard (role-side patches aimed at
+// profile-declared containers) additionally enforces the D9 one-way
+// principle on the decoded value: a role-declared volume mount or a
+// consuming-namespace secretKeyRef/configMapKeyRef env value is a render
+// error.
 func applyJSONPatch(
 	logger logr.Logger,
 	container *v1.Container,
 	rule workloadsv1alpha2.ContainerJSONPatch,
 	volumeNames map[string]struct{},
+	oneWay *oneWayGuard,
 	source patchSource,
 	containerName string,
 	idx int,
@@ -354,6 +384,15 @@ func applyJSONPatch(
 				"%s[%d] path %q: an env var requires a name", source.describe(), idx, rule.Path,
 			)
 		}
+		if oneWay != nil && env.ValueFrom != nil &&
+			(env.ValueFrom.SecretKeyRef != nil || env.ValueFrom.ConfigMapKeyRef != nil) {
+			return fmt.Errorf(
+				"%s[%d] path %q adds env var %q with a consuming-namespace secretKeyRef or configMapKeyRef to "+
+					"profile-declared container %q, which violates the one-way principle: only the role consumes the "+
+					"profile's content, never the converse — a role-declared container may carry it instead",
+				source.describe(), idx, rule.Path, env.Name, containerName,
+			)
+		}
 		for _, existing := range container.Env {
 			if existing.Name == env.Name {
 				// add has no read ability, so it cannot compose with an
@@ -380,6 +419,16 @@ func applyJSONPatch(
 			return fmt.Errorf(
 				"%s[%d] path %q: a volumeMount requires a mountPath", source.describe(), idx, rule.Path,
 			)
+		}
+		if oneWay != nil {
+			if _, roleDeclared := oneWay.roleVolumeNames[mount.Name]; roleDeclared {
+				return fmt.Errorf(
+					"%s[%d] path %q mounts role-declared volume %q into profile-declared container %q, "+
+						"which violates the one-way principle: only the role consumes the profile's content, never the "+
+						"converse — a role-declared container may mount it instead",
+					source.describe(), idx, rule.Path, mount.Name, containerName,
+				)
+			}
 		}
 		if err := checkVolumeMount(container, mount, volumeNames, source, containerName, idx, rule.Path); err != nil {
 			return err
