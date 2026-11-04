@@ -28,6 +28,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	coreapplyv1 "k8s.io/client-go/applyconfigurations/core/v1"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/rbgs/api/workloads/constants"
 	workloadsv1alpha2 "sigs.k8s.io/rbgs/api/workloads/v1alpha2"
@@ -886,6 +888,136 @@ func TestPodReconciler_OneWayVolumeSnapshotBeforeInjection(t *testing.T) {
 		}
 	}
 	assert.Equal(t, []string{"rbg-cluster-config"}, sidecarMounts)
+}
+
+// TestPodReconciler_PositionalShadowingEvent pins the KEP-531 D10 second
+// clause at the reconciler: a role-side positional insert landing ahead of a
+// profile-side one on the same container emits exactly one
+// EngineRuntimePositionalShadowing warning event naming the container, and
+// the render still succeeds. The profile-side pass records its positional
+// inserts, the role-side pass reports the shadowed containers, and the
+// reconciler emits the event — shadowing never fails the render and is never
+// silent.
+func TestPodReconciler_PositionalShadowingEvent(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = workloadsv1alpha2.AddToScheme(scheme)
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	rbg := wrappersv2.BuildBasicRoleBasedGroup("shadow-rbg", "default").Obj()
+	role := &rbg.Spec.Roles[0]
+
+	// the role's own template declares the command both inserts address
+	template := corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+		Name: "engine", Image: "sglang:latest", Command: []string{"python"},
+	}}}}
+
+	commandPatch := func(t *testing.T, path, value string) *workloadsv1alpha2.ContainerJSONPatch {
+		t.Helper()
+		raw, err := json.Marshal(value)
+		require.NoError(t, err)
+		return &workloadsv1alpha2.ContainerJSONPatch{
+			Op: "add", Path: path, Value: runtime.RawExtension{Raw: raw},
+		}
+	}
+
+	// render runs one render pass with the given plan wired for the
+	// standalone position; injectors are disabled so the assertion observes
+	// only the patch passes.
+	render := func(t *testing.T, plan *discovery.EngineRuntimePlan) (
+		*coreapplyv1.PodTemplateSpecApplyConfiguration, *record.FakeRecorder, error,
+	) {
+		t.Helper()
+		recorder := record.NewFakeRecorder(16)
+		reconciler := NewPodReconciler(scheme, client)
+		reconciler.SetInjectors([]string{})
+		reconciler.SetRecorder(recorder)
+		reconciler.SetEngineRuntimePlan(discovery.StandalonePositionName, plan)
+		result, err := reconciler.ConstructPodTemplateSpecApplyConfiguration(
+			context.Background(), rbg, role, nil, template,
+		)
+		return result, recorder, err
+	}
+
+	drainEvents := func(recorder *record.FakeRecorder) []string {
+		var events []string
+		for {
+			select {
+			case ev := <-recorder.Events:
+				events = append(events, ev)
+			default:
+				return events
+			}
+		}
+	}
+
+	t.Run("a role-side insert ahead of a profile-side one emits the warning and renders", func(t *testing.T) {
+		plan := &discovery.EngineRuntimePlan{
+			PatchApplications: map[string][]discovery.EngineRuntimePatch{
+				discovery.StandalonePositionName: {{
+					ProfileName: "rt",
+					Targets:     []string{"engine"},
+					Patches: []workloadsv1alpha2.ContainerPatch{
+						{JSONPatch: commandPatch(t, "/command/1", "profile-wrap")},
+					},
+				}},
+			},
+			RolePatchApplications: map[string][]discovery.EngineRuntimeRolePatch{
+				discovery.StandalonePositionName: {{
+					ProfileName:        "rt",
+					DeclaredContainers: map[string]struct{}{},
+					Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{{
+						Container: "engine",
+						JSONPatch: commandPatch(t, "/command/0", "role-wrap"),
+					}},
+				}},
+			},
+			RoleName: role.Name,
+		}
+
+		result, recorder, err := render(t, plan)
+		require.NoError(t, err, "positional shadowing warns, it never fails the render")
+
+		// the render succeeded: the role-side insert is the rendered
+		// command's index 0, ahead of the profile-side insert
+		require.Len(t, result.Spec.Containers, 1)
+		assert.Equal(t, []string{"role-wrap", "python", "profile-wrap"}, result.Spec.Containers[0].Command)
+
+		events := drainEvents(recorder)
+		require.Len(t, events, 1)
+		assert.Contains(t, events[0], discovery.ReasonEngineRuntimePositionalShadowing)
+		assert.Contains(t, events[0], "engine")
+	})
+
+	t.Run("a role-side append over a profile-side insert emits no event", func(t *testing.T) {
+		plan := &discovery.EngineRuntimePlan{
+			PatchApplications: map[string][]discovery.EngineRuntimePatch{
+				discovery.StandalonePositionName: {{
+					ProfileName: "rt",
+					Targets:     []string{"engine"},
+					Patches: []workloadsv1alpha2.ContainerPatch{
+						{JSONPatch: commandPatch(t, "/command/1", "profile-wrap")},
+					},
+				}},
+			},
+			RolePatchApplications: map[string][]discovery.EngineRuntimeRolePatch{
+				discovery.StandalonePositionName: {{
+					ProfileName:        "rt",
+					DeclaredContainers: map[string]struct{}{},
+					Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{{
+						Container: "engine",
+						JSONPatch: commandPatch(t, "/command/-", "role-wrap"),
+					}},
+				}},
+			},
+			RoleName: role.Name,
+		}
+
+		result, recorder, err := render(t, plan)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Empty(t, drainEvents(recorder), "an append lands after everything and shadows nothing")
+	})
 }
 
 func Test_setExclusiveAffinities(t *testing.T) {

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -196,10 +197,14 @@ func (r *PodReconciler) ConstructPodTemplateSpecApplyConfiguration(
 		// built-in injector chain, so a patch-appended env entry is never
 		// dropped or reordered by the built-in env dedup, and the patch
 		// duplicate-name check also sees the built-in RBG_* entries.
-		if err := discovery.ApplyEngineRuntimePatches(
+		// The pass also records which containers took a positional
+		// (numeric-index) insert — the profile-side half of the D10
+		// positional-shadowing report.
+		profilePositionalInserts, err := discovery.ApplyEngineRuntimePatches(
 			ctx, &podTemplateSpec, roleContainerNames,
 			r.engineRuntimePlan.PatchApplications[r.engineRuntimePosition],
-		); err != nil {
+		)
+		if err != nil {
 			if r.recorder != nil {
 				r.recorder.Event(rbg, corev1.EventTypeWarning, discovery.ReasonEngineRuntimeRenderFailed,
 					fmt.Sprintf("engine runtime render failed: %s", err.Error()))
@@ -208,16 +213,40 @@ func (r *PodReconciler) ConstructPodTemplateSpecApplyConfiguration(
 		}
 		// KEP-531 application order: the role-side containerPatches pass
 		// applies last — what the role writes lands where it is written.
-		if err := discovery.ApplyRoleEngineRuntimePatches(
+		// Its report names the containers where the role's positional
+		// inserts landed ahead of the profile-side pass's.
+		shadowed, err := discovery.ApplyRoleEngineRuntimePatches(
 			ctx, &podTemplateSpec, roleContainerNames, roleInitContainerNames, roleVolumeNames,
 			r.engineRuntimePlan.RolePatchApplications[r.engineRuntimePosition],
 			r.engineRuntimePlan.RoleName,
-		); err != nil {
+			profilePositionalInserts,
+		)
+		if err != nil {
 			if r.recorder != nil {
 				r.recorder.Event(rbg, corev1.EventTypeWarning, discovery.ReasonEngineRuntimeRenderFailed,
 					fmt.Sprintf("engine runtime render failed: %s", err.Error()))
 			}
 			return nil, fmt.Errorf("failed to apply role engine runtime patches: %w", err)
+		}
+		// KEP-531 D10, second clause: a role-side positional insert landing
+		// ahead of a profile-side one on the same container shadows it — the
+		// role-side pass runs last, so its insert lands at the written index
+		// and shifts profile-side content at or after it. The render
+		// succeeded; the warning event exists so the shadowing is never
+		// silent, naming the container(s) for the role author to review.
+		if len(shadowed) > 0 && r.recorder != nil {
+			names := make([]string, 0, len(shadowed))
+			for name := range shadowed {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			r.recorder.Event(rbg, corev1.EventTypeWarning, discovery.ReasonEngineRuntimePositionalShadowing,
+				fmt.Sprintf(
+					"role %q: role-side positional inserts landed ahead of profile-side ones on container(s) %s; "+
+						"the render succeeded, but the role-side patch pass runs last (KEP-531 D10), so its index "+
+						"insert shifts profile-side content at or after it — verify the profile's positional "+
+						"inserts still land as intended",
+					role.Name, strings.Join(names, ", ")))
 		}
 	}
 

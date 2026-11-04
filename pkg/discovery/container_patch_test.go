@@ -66,7 +66,7 @@ func jp(path string, value any) workloadsv1alpha2.ContainerPatch {
 func apply(ctx context.Context, spec *v1.PodTemplateSpec, targets []string,
 	rules []workloadsv1alpha2.ContainerPatch, profile string,
 ) error {
-	return ApplyContainerPatch(ctx, spec, roleContainers("engine"), targets, rules, profile)
+	return ApplyContainerPatch(ctx, spec, roleContainers("engine"), targets, rules, profile, nil)
 }
 
 func TestApplyContainerPatchTargeting(t *testing.T) {

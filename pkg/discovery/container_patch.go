@@ -39,7 +39,34 @@ const (
 	// ReasonEngineRuntimeRenderFailed: emitted alongside a render error for
 	// timeline observability.
 	ReasonEngineRuntimeRenderFailed = "EngineRuntimeRenderFailed"
+	// ReasonEngineRuntimePositionalShadowing: a role-side positional insert
+	// landed ahead of a profile-side insert on the same container (KEP-531
+	// D10, second clause). The render succeeds — the event exists so the
+	// shadowing is never silent.
+	ReasonEngineRuntimePositionalShadowing = "EngineRuntimePositionalShadowing"
 )
+
+// positionalInsertRecorder accumulates the container names that took a
+// positional insert (a numeric-index, non-"-" element pointer) during one
+// patch pass. Both passes thread it through applyJSONPatch: the profile-side
+// pass's record feeds the role-side pass's D10 positional-shadowing report.
+// A nil pointer records nothing.
+type positionalInsertRecorder struct {
+	containers map[string]struct{}
+}
+
+// record notes one positional insert on containerName. A "-" (append)
+// pointer never records: an append lands after all existing content and
+// shadows nothing.
+func (p *positionalInsertRecorder) record(containerName, seg string) {
+	if p == nil || seg == "-" {
+		return
+	}
+	if p.containers == nil {
+		p.containers = make(map[string]struct{})
+	}
+	p.containers[containerName] = struct{}{}
+}
 
 // patchSource names the author of a patch list so render errors attribute
 // to the side that wrote the rules.
@@ -82,7 +109,9 @@ func renderedVolumeNames(podSpec *v1.PodTemplateSpec) map[string]struct{} {
 // roleContainerNames holds the spec.containers names the role's own template
 // declared, captured by the caller before any profile fragment injection —
 // profile-injected containers and role-declared initContainers are
-// therefore never addressable.
+// therefore never addressable. positional, when non-nil, accumulates the
+// container names that took a positional (numeric-index) insert — the raw
+// material of the D10 positional-shadowing report.
 //
 // The write-time path allowlist is CEL; this pass re-checks the full grammar
 // (an element pointer under a finite root set) so a path that slips the CEL
@@ -100,6 +129,7 @@ func ApplyContainerPatch(
 	targets []string,
 	patches []workloadsv1alpha2.ContainerPatch,
 	profileName string,
+	positional *positionalInsertRecorder,
 ) error {
 	if len(patches) == 0 || len(targets) == 0 {
 		return nil
@@ -143,7 +173,7 @@ func ApplyContainerPatch(
 			)
 		}
 		for i, rule := range patches {
-			if err := applyJSONPatch(logger, container, *rule.JSONPatch, volumeNames, nil, source, target, i); err != nil {
+			if err := applyJSONPatch(logger, container, *rule.JSONPatch, volumeNames, nil, positional, source, target, i); err != nil {
 				return err
 			}
 		}
@@ -155,21 +185,25 @@ func ApplyContainerPatch(
 // template: it feeds each per-reference entry to ApplyContainerPatch in
 // role-list order, so a later reference's rules see the mutations of earlier
 // ones — standard application order, preserved from the fragment-builder era
-// by keeping the reference sequence the outer loop.
+// by keeping the reference sequence the outer loop. It also returns the
+// container names that took a positional (numeric-index) insert during the
+// pass — the profile-side half of the D10 positional-shadowing report, which
+// the role-side pass consumes.
 func ApplyEngineRuntimePatches(
 	ctx context.Context,
 	podSpec *v1.PodTemplateSpec,
 	roleContainerNames map[string]struct{},
 	entries []EngineRuntimePatch,
-) error {
+) (map[string]struct{}, error) {
+	var positional positionalInsertRecorder
 	for _, entry := range entries {
 		if err := ApplyContainerPatch(
-			ctx, podSpec, roleContainerNames, entry.Targets, entry.Patches, entry.ProfileName,
+			ctx, podSpec, roleContainerNames, entry.Targets, entry.Patches, entry.ProfileName, &positional,
 		); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return positional.containers, nil
 }
 
 // ApplyRoleEngineRuntimePatches applies the role-side containerPatches of
@@ -186,6 +220,13 @@ func ApplyEngineRuntimePatches(
 // profile-declared, the pass enforces the D9 one-way principle on that
 // patch's decoded value: only the role consumes the profile's content, never
 // the converse, so a cluster-scoped profile stays self-contained.
+//
+// profilePositionalInserts is the profile-side pass's positional-insert
+// record for this template (ApplyEngineRuntimePatches's return value); the
+// returned map is the D10 positional-shadowing report — the containers where
+// this pass's positional inserts landed ahead of the profile-side pass's.
+// Shadowing never fails the render; the caller emits a warning event so it
+// is never silent.
 func ApplyRoleEngineRuntimePatches(
 	ctx context.Context,
 	podSpec *v1.PodTemplateSpec,
@@ -194,12 +235,14 @@ func ApplyRoleEngineRuntimePatches(
 	roleVolumeNames map[string]struct{},
 	entries []EngineRuntimeRolePatch,
 	roleName string,
-) error {
+	profilePositionalInserts map[string]struct{},
+) (map[string]struct{}, error) {
 	if len(entries) == 0 {
-		return nil
+		return nil, nil
 	}
 	logger := log.FromContext(ctx)
 	volumeNames := renderedVolumeNames(podSpec)
+	var positional positionalInsertRecorder
 	for _, entry := range entries {
 		source := rolePatchSource(roleName, entry.ProfileName)
 		for i, patch := range entry.Patches {
@@ -208,7 +251,7 @@ func ApplyRoleEngineRuntimePatches(
 				source, i, patch.Container,
 			)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			// The one-way guard is per-target: a role-owned target may
 			// consume both sides' content, so it enforces nothing.
@@ -216,12 +259,34 @@ func ApplyRoleEngineRuntimePatches(
 			if profileDeclared {
 				oneWay = &oneWayGuard{roleVolumeNames: roleVolumeNames}
 			}
-			if err := applyJSONPatch(logger, container, *patch.JSONPatch, volumeNames, oneWay, source, patch.Container, i); err != nil {
-				return err
+			if err := applyJSONPatch(logger, container, *patch.JSONPatch, volumeNames, oneWay, &positional, source, patch.Container, i); err != nil {
+				return nil, err
 			}
 		}
 	}
-	return nil
+	return shadowedContainers(positional.containers, profilePositionalInserts), nil
+}
+
+// shadowedContainers computes the KEP-531 D10 positional-shadowing report:
+// the containers where the role-side pass made a positional insert over a
+// container the profile-side pass also positionally inserted. Because the
+// role-side pass runs last, its insert lands at the written index and shifts
+// profile-side content at or after it — a profile whose wrap must be
+// outermost is thereby shadowed. The report is per container: it cannot say
+// which specific elements moved, only that both sides claimed absolute
+// positions on the same container, so it errs toward reporting rather than
+// staying silent.
+func shadowedContainers(rolePositional, profilePositionalInserts map[string]struct{}) map[string]struct{} {
+	if len(rolePositional) == 0 || len(profilePositionalInserts) == 0 {
+		return nil
+	}
+	shadowed := make(map[string]struct{}, len(rolePositional))
+	for container := range rolePositional {
+		if _, ok := profilePositionalInserts[container]; ok {
+			shadowed[container] = struct{}{}
+		}
+	}
+	return shadowed
 }
 
 // oneWayGuard carries the KEP-531 D9 ownership boundary for a role-side
@@ -313,13 +378,15 @@ func findRenderedProfileContainer(podSpec *v1.PodTemplateSpec, name string) *v1.
 // profile-declared containers) additionally enforces the D9 one-way
 // principle on the decoded value: a role-declared volume mount or a
 // consuming-namespace secretKeyRef/configMapKeyRef env value is a render
-// error.
+// error. positional, when non-nil, records the container each successful
+// positional insert touched — the D10 shadowing report's raw material.
 func applyJSONPatch(
 	logger logr.Logger,
 	container *v1.Container,
 	rule workloadsv1alpha2.ContainerJSONPatch,
 	volumeNames map[string]struct{},
 	oneWay *oneWayGuard,
+	positional *positionalInsertRecorder,
 	source patchSource,
 	containerName string,
 	idx int,
@@ -357,6 +424,7 @@ func applyJSONPatch(
 			return patchIndexError(source, idx, rule.Path, err)
 		}
 		container.Command = list
+		positional.record(containerName, seg)
 	case "args":
 		value, err := decodePatchString(rule.Value.Raw)
 		if err != nil {
@@ -374,6 +442,7 @@ func applyJSONPatch(
 			return patchIndexError(source, idx, rule.Path, err)
 		}
 		container.Args = list
+		positional.record(containerName, seg)
 	case "env":
 		var env v1.EnvVar
 		if err := decodePatchStruct(rule.Value.Raw, &env); err != nil {
@@ -410,6 +479,7 @@ func applyJSONPatch(
 			return patchIndexError(source, idx, rule.Path, err)
 		}
 		container.Env = list
+		positional.record(containerName, seg)
 	case "volumeMounts":
 		var mount v1.VolumeMount
 		if err := decodePatchStruct(rule.Value.Raw, &mount); err != nil {
@@ -441,6 +511,7 @@ func applyJSONPatch(
 			return patchIndexError(source, idx, rule.Path, err)
 		}
 		container.VolumeMounts = list
+		positional.record(containerName, seg)
 	case "capabilities":
 		capability, err := decodePatchString(rule.Value.Raw)
 		if err != nil {
@@ -468,6 +539,7 @@ func applyJSONPatch(
 			return patchIndexError(source, idx, rule.Path, err)
 		}
 		container.SecurityContext.Capabilities.Add = list
+		positional.record(containerName, seg)
 	default:
 		// Unreachable: parsePatchPath rejects other roots.
 		return fmt.Errorf("%s[%d] path %q: unsupported target", source.describe(), idx, rule.Path)
