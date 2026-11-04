@@ -184,7 +184,8 @@ func resolverHarness(
 }
 
 // TestResolveEngineRuntimes pins the KEP-531 resolver semantics: the D2
-// all-components default, single-component scoping, bare-name consent
+// pattern default (leader-only under leaderWorkerPattern), single-component
+// scoping, bare-name consent
 // (patchContainers), role-side expression (containerPatches), the D6
 // scope-ownership rule with its compatibility exemption, and the D7 render
 // re-check — each warning event firing exactly once per reference per
@@ -216,7 +217,7 @@ func TestResolveEngineRuntimes(t *testing.T) {
 		assert.Equal(t, 1, countEventsContaining(t, recorder, ReasonEngineRuntimeRenderFailed))
 	})
 
-	t.Run("D2 default: absent component expands to every component", func(t *testing.T) {
+	t.Run("D2 default: absent component expands to the pattern default set — leader only under leaderWorkerPattern", func(t *testing.T) {
 		profile := makeProfile("p", nil)
 		role := leaderWorkerRole([]workloadsv1alpha2.EngineRuntime{{ProfileName: "p"}})
 		plan, err, recorder := resolverHarness(t, []*workloadsv1alpha2.ClusterEngineRuntimeProfile{profile}, role)
@@ -225,9 +226,22 @@ func TestResolveEngineRuntimes(t *testing.T) {
 
 		require.Len(t, plan.FragmentApplications[leader], 1)
 		assert.Equal(t, "p", plan.FragmentApplications[leader][0].Profile.Name)
+		// main never runs the sidecar stage for the worker template, so the
+		// compatibility default must not deliver there
+		assert.NotContains(t, plan.FragmentApplications, worker)
+		assert.Equal(t, []string{leader, worker}, plan.Vocabulary)
+	})
+
+	t.Run("D2 capability: component worker reaches the worker position", func(t *testing.T) {
+		profile := makeProfile("p", nil)
+		role := leaderWorkerRole([]workloadsv1alpha2.EngineRuntime{{ProfileName: "p", Component: worker}})
+		plan, err, recorder := resolverHarness(t, []*workloadsv1alpha2.ClusterEngineRuntimeProfile{profile}, role)
+		require.NoError(t, err)
+		assert.Empty(t, collectEvents(t, recorder))
+
 		require.Len(t, plan.FragmentApplications[worker], 1)
 		assert.Equal(t, "p", plan.FragmentApplications[worker][0].Profile.Name)
-		assert.Equal(t, []string{leader, worker}, plan.Vocabulary)
+		assert.NotContains(t, plan.FragmentApplications, leader)
 	})
 
 	t.Run("explicit component narrows the scope", func(t *testing.T) {
@@ -353,7 +367,7 @@ func TestResolveEngineRuntimes(t *testing.T) {
 
 		// two references of the pure compatibility shape keep main's
 		// semantics verbatim: no ownership check, fragments append in
-		// role-list order under every component
+		// role-list order under the pattern's default set (leader only)
 		role = leaderWorkerRole([]workloadsv1alpha2.EngineRuntime{
 			{ProfileName: "p"},
 			{ProfileName: "p"},
@@ -362,7 +376,7 @@ func TestResolveEngineRuntimes(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, collectEvents(t, recorder))
 		require.Len(t, plan.FragmentApplications[leader], 2)
-		require.Len(t, plan.FragmentApplications[worker], 2)
+		assert.NotContains(t, plan.FragmentApplications, worker)
 		assert.Equal(t, "p", plan.FragmentApplications[leader][0].Profile.Name)
 		assert.Equal(t, "p", plan.FragmentApplications[leader][1].Profile.Name)
 	})

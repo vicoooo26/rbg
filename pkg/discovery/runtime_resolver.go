@@ -261,8 +261,9 @@ func failRef(
 }
 
 // effectivePositions computes a reference's effective position set: the
-// single named component when component is set, else the pattern default
-// (every component — the compatibility expansion). The explicit form is
+// single named component when component is set, else the pattern's default
+// set (per-pattern per D2 — leader-only under leaderWorkerPattern, every
+// declared component under customComponentsPattern). The explicit form is
 // validated against the vocabulary; a standalonePattern role defines none.
 func effectivePositions(
 	role *workloadsv1alpha2.RoleSpec,
@@ -290,8 +291,10 @@ func effectivePositions(
 // positionVocabulary returns the legal position names of the role's pattern,
 // the render vocabulary (the ordered positions a plan's applications may key
 // by — the vocabulary plus the standalone sentinel where the pattern defines
-// none), and the default effective set used when component is absent — every
-// component of the pattern (main's published behavior).
+// none), and the default effective set used when component is absent — the
+// pattern's default component set per D2 (main's published behavior:
+// leader-only under leaderWorkerPattern, every declared component under
+// customComponentsPattern).
 func positionVocabulary(role *workloadsv1alpha2.RoleSpec) (map[string]struct{}, []string, []string) {
 	switch {
 	case role.GetStandalonePattern() != nil:
@@ -299,7 +302,11 @@ func positionVocabulary(role *workloadsv1alpha2.RoleSpec) (map[string]struct{}, 
 	case role.GetLeaderWorkerPattern() != nil:
 		leader := string(constants.LeaderComponentType)
 		worker := string(constants.WorkerComponentType)
-		return map[string]struct{}{leader: {}, worker: {}}, []string{leader, worker}, []string{leader, worker}
+		// D2: the absent-component default is main's published behavior — the
+		// worker template runs no sidecar stage, so only the leader position
+		// is in the default set. component: worker is the new capability that
+		// reaches it.
+		return map[string]struct{}{leader: {}, worker: {}}, []string{leader, worker}, []string{leader}
 	case role.GetCustomComponentsPattern() != nil:
 		components := role.GetCustomComponentsPattern().Components
 		vocabulary := make(map[string]struct{}, len(components))
