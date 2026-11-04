@@ -419,24 +419,46 @@ func TestResolveEngineRuntimes(t *testing.T) {
 		assert.Equal(t, "worker", plan.RoleName)
 	})
 
-	t.Run("role-side unknown target is a render error", func(t *testing.T) {
+	t.Run("D8: role-side targets are not validated against the profile's declarations at resolve time", func(t *testing.T) {
+		// a reference's containerPatches may target role-declared containers
+		// the profile knows nothing about; the render pass resolves each
+		// target against the role-declared names plus this reference's
+		// declared set, so the resolver routes without rejecting
 		profile := declaringProfile("p")
 		role := leaderWorkerRole([]workloadsv1alpha2.EngineRuntime{{
 			ProfileName: "p",
 			Component:   leader,
-			ContainerPatches: []workloadsv1alpha2.EngineRuntimeContainerPatch{{
-				Container: "nope",
-				JSONPatch: &workloadsv1alpha2.ContainerJSONPatch{
-					Op: "add", Path: "/env/-",
-					Value: runtime.RawExtension{Raw: []byte(`{"name":"A","value":"b"}`)},
+			ContainerPatches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
+				{
+					Container: "engine", // role-declared, not declared by the profile
+					JSONPatch: &workloadsv1alpha2.ContainerJSONPatch{
+						Op: "add", Path: "/env/-",
+						Value: runtime.RawExtension{Raw: []byte(`{"name":"A","value":"b"}`)},
+					},
 				},
-			}},
+				{
+					Container: "runtime-sidecar", // profile-declared
+					JSONPatch: &workloadsv1alpha2.ContainerJSONPatch{
+						Op: "add", Path: "/env/-",
+						Value: runtime.RawExtension{Raw: []byte(`{"name":"B","value":"c"}`)},
+					},
+				},
+			},
 		}})
 		plan, err, recorder := resolverHarness(t, []*workloadsv1alpha2.ClusterEngineRuntimeProfile{profile}, role)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), `targets container "nope", which the profile does not declare`)
-		assert.Nil(t, plan.RolePatchApplications[leader])
-		assert.True(t, hasEventContaining(t, recorder, ReasonEngineRuntimeRenderFailed))
+		require.NoError(t, err)
+		assert.Empty(t, collectEvents(t, recorder))
+
+		require.Len(t, plan.RolePatchApplications[leader], 1)
+		routed := plan.RolePatchApplications[leader][0]
+		require.Len(t, routed.Patches, 2)
+		assert.Equal(t, "engine", routed.Patches[0].Container)
+		assert.Equal(t, "runtime-sidecar", routed.Patches[1].Container)
+		// the profile-declared half of the target vocabulary travels with the
+		// entry: it names what this reference's own profile declares
+		assert.Contains(t, routed.DeclaredContainers, "runtime-init")
+		assert.Contains(t, routed.DeclaredContainers, "runtime-sidecar")
+		assert.NotContains(t, routed.DeclaredContainers, "engine")
 	})
 
 	t.Run("role-side entry without a patch field is a render error", func(t *testing.T) {

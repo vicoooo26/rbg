@@ -58,9 +58,11 @@ type EngineRuntimePatch struct {
 
 // EngineRuntimeRolePatch is one reference's role-side patches routed to one
 // position. DeclaredContainers is the profile-declared name set (init
-// containers and sidecars), captured at resolve time; the render pass uses
-// it only for error wording, since the resolver already rejected unknown
-// targets.
+// containers and sidecars), captured at resolve time; the render pass
+// resolves each entry's target against the role-declared names first, then
+// this set — the profile-declared half of the target vocabulary (D8: a
+// reference-side entry may target a role-declared container, with no consent
+// involved, or a container this reference's own profile declares).
 type EngineRuntimeRolePatch struct {
 	ProfileName        string
 	Patches            []workloadsv1alpha2.EngineRuntimeContainerPatch
@@ -74,8 +76,9 @@ type EngineRuntimeRolePatch struct {
 // append-only, consent-free, idempotent. PatchApplications feeds the
 // profile-side patch pass (the profile's patches at the consented addresses
 // of the named component); RolePatchApplications feeds the role-side patch
-// pass (the reference's patches into profile-declared containers of the
-// named component). All preserve role-list order within a position.
+// pass (the reference's patches into role-declared or profile-declared
+// containers of the named component, per D8). All preserve role-list order
+// within a position.
 type EngineRuntimePlan struct {
 	FragmentApplications  map[string][]EngineRuntimeFragment
 	PatchApplications     map[string][]EngineRuntimePatch
@@ -110,9 +113,12 @@ func (p *EngineRuntimePlan) HasPosition(name string) bool {
 // pass. It computes each reference's effective component set, routes its
 // fragments and both patch dimensions, and validates what no per-template
 // pass can see whole: unknown components, patch fields without a component
-// (the D7 re-check), duplicate patchContainers names, role-side targets the
-// profile does not declare, and the D6 scope-ownership rule across two
-// references to the same profile. The unaimed-patch warning is emitted here,
+// (the D7 re-check), duplicate patchContainers names, and the D6
+// scope-ownership rule across two references to the same profile.
+// Role-side patch targets are deliberately not validated here — D8 resolves
+// them at render time against the role-declared names plus the reference's
+// own profile declarations, which only the per-template pass can see.
+// The unaimed-patch warning is emitted here,
 // once per reference per render — a per-template pass would duplicate it
 // under leaderWorkerPattern once both templates run a pass.
 func ResolveEngineRuntimes(
@@ -213,6 +219,12 @@ func ResolveEngineRuntimes(
 		}
 
 		if len(runtime.ContainerPatches) > 0 {
+			// The profile-declared half of this reference's target
+			// vocabulary: a role-side entry may target a role-declared
+			// container (no consent involved) or one this profile declares,
+			// so the resolver routes the entries unvalidated — the render
+			// pass resolves each target against the role-declared names
+			// snapshotted before injection plus this set.
 			declared := make(map[string]struct{},
 				len(profile.Spec.InitContainers)+len(profile.Spec.Containers))
 			for _, c := range profile.Spec.InitContainers {
@@ -222,12 +234,6 @@ func ResolveEngineRuntimes(
 				declared[c.Name] = struct{}{}
 			}
 			for i, entry := range runtime.ContainerPatches {
-				if _, ok := declared[entry.Container]; !ok {
-					return plan, failRef(ctx, recorder, rbg, runtime, fmt.Errorf(
-						"role %q reference %q containerPatches[%d] targets container %q, "+
-							"which the profile does not declare",
-						role.Name, runtime.ProfileName, i, entry.Container))
-				}
 				if entry.JSONPatch == nil {
 					return plan, failRef(ctx, recorder, rbg, runtime, fmt.Errorf(
 						"role %q reference %q containerPatches[%d]: no patch field is set; exactly one must be",

@@ -424,49 +424,91 @@ func TestEngineRuntimeCrossProfileVolumeVisibility(t *testing.T) {
 	assert.Equal(t, "/opt/b", engine.VolumeMounts[0].MountPath)
 }
 
-// TestEngineRuntimePatchPassOrder pins the KEP-531 D10 pass order at the one
-// point the discovery layer can observe it: with both patch passes failing,
+// TestEngineRuntimePatchPassOrder pins the KEP-531 D10 pass order at the two
+// points the discovery layer can observe it. With both patch passes failing,
 // the error of the pass that runs first surfaces — the profile-side pass
-// (stage 3) before the role-side pass (stage 4, last). renderResolvedPosition
-// mirrors the PodReconciler pipeline's pass order, so the surfaced
-// attribution pins that order.
+// (stage 3) before the role-side pass (stage 4, last). And with both passes
+// succeeding on the same role-declared container — the direct overlap D8's
+// target vocabulary admits — the role-side mutations land last.
+// renderResolvedPosition mirrors the PodReconciler pipeline's pass order, so
+// the surfaced attribution and the landed order both pin that order directly.
 func TestEngineRuntimePatchPassOrder(t *testing.T) {
-	// Both sides collide with content the fragment pass already rendered:
-	// the role's legacy merge appended ROLE_ENV to the role-owned engine,
-	// which the profile-side patch re-adds, and the profile declares ROLE_X
-	// on its sidecar, which the role-side patch re-adds.
-	profile := makeProfile("ik", []workloadsv1alpha2.ContainerPatch{
-		envPatch("ROLE_ENV", "profile-side"),
-	})
-	profile.Spec.Containers = []v1.Container{
-		{Name: "runtime-sidecar", Env: []v1.EnvVar{{Name: "ROLE_X", Value: "profile"}}},
-		{Name: "engine"}, // declared so the legacy merge reaches the role-owned engine
-	}
-	role := leaderWorkerRole([]workloadsv1alpha2.EngineRuntime{{
-		ProfileName:     "ik",
-		Component:       leaderPos(),
-		PatchContainers: []string{"engine"},
-		Containers: []v1.Container{{
-			Name: "engine",
-			Env:  []v1.EnvVar{{Name: "ROLE_ENV", Value: "role"}},
-		}},
-		ContainerPatches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
-			roleJp("runtime-sidecar", "/env/-", v1.EnvVar{Name: "ROLE_X", Value: "role"}),
-		},
-	}})
-	plan, err, recorder := resolverHarness(
-		t, []*workloadsv1alpha2.ClusterEngineRuntimeProfile{profile}, role,
-	)
-	require.NoError(t, err)
-	assert.Empty(t, collectEvents(t, recorder))
+	t.Run("with both patch passes failing, the profile-side error surfaces first", func(t *testing.T) {
+		// Both sides collide with content the fragment pass already rendered:
+		// the role's legacy merge appended ROLE_ENV to the role-owned engine,
+		// which the profile-side patch re-adds, and the profile declares ROLE_X
+		// on its sidecar, which the role-side patch re-adds.
+		profile := makeProfile("ik", []workloadsv1alpha2.ContainerPatch{
+			envPatch("ROLE_ENV", "profile-side"),
+		})
+		profile.Spec.Containers = []v1.Container{
+			{Name: "runtime-sidecar", Env: []v1.EnvVar{{Name: "ROLE_X", Value: "profile"}}},
+			{Name: "engine"}, // declared so the legacy merge reaches the role-owned engine
+		}
+		role := leaderWorkerRole([]workloadsv1alpha2.EngineRuntime{{
+			ProfileName:     "ik",
+			Component:       leaderPos(),
+			PatchContainers: []string{"engine"},
+			Containers: []v1.Container{{
+				Name: "engine",
+				Env:  []v1.EnvVar{{Name: "ROLE_ENV", Value: "role"}},
+			}},
+			ContainerPatches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
+				roleJp("runtime-sidecar", "/env/-", v1.EnvVar{Name: "ROLE_X", Value: "role"}),
+			},
+		}})
+		plan, err, recorder := resolverHarness(
+			t, []*workloadsv1alpha2.ClusterEngineRuntimeProfile{profile}, role,
+		)
+		require.NoError(t, err)
+		assert.Empty(t, collectEvents(t, recorder))
 
-	template := *role.GetLeaderWorkerPattern().TemplateSource.Template
-	_, err = renderResolvedPosition(t, plan, leaderPos(), template)
-	require.Error(t, err)
-	// the profile-side pass ran first: its collision surfaces, not the
-	// role-side one
-	assert.Contains(t, err.Error(), `profile "ik" containerPatches[0]`)
-	assert.NotContains(t, err.Error(), `role "worker" engineRuntimes`)
+		template := *role.GetLeaderWorkerPattern().TemplateSource.Template
+		_, err = renderResolvedPosition(t, plan, leaderPos(), template)
+		require.Error(t, err)
+		// the profile-side pass ran first: its collision surfaces, not the
+		// role-side one
+		assert.Contains(t, err.Error(), `profile "ik" containerPatches[0]`)
+		assert.NotContains(t, err.Error(), `role "worker" engineRuntimes`)
+	})
+
+	t.Run("both patch passes on one role-declared container: the role-side result lands last", func(t *testing.T) {
+		// The direct overlap the failing-pass pin above cannot express: D8
+		// lets the role-side pass target the same role-declared container the
+		// profile-side pass patches, and D10 decides the outcome — the
+		// role-side pass runs last, so its /command/0 insert lands ahead of
+		// (wrapping) the profile's and its env append lands after it.
+		profile := makeProfile("ik", []workloadsv1alpha2.ContainerPatch{
+			jp("/command/0", "profile-wrap"),
+			envPatch("PROF_ENV", "profile-side"),
+		})
+		role := leaderWorkerRole([]workloadsv1alpha2.EngineRuntime{{
+			ProfileName:     "ik",
+			Component:       leaderPos(),
+			PatchContainers: []string{"engine"},
+			ContainerPatches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
+				roleJp("engine", "/command/0", "role-wrap"),
+				roleJp("engine", "/env/-", v1.EnvVar{Name: "ROLE_ENV", Value: "role-side"}),
+			},
+		}})
+		plan, err, recorder := resolverHarness(
+			t, []*workloadsv1alpha2.ClusterEngineRuntimeProfile{profile}, role,
+		)
+		require.NoError(t, err)
+		assert.Empty(t, collectEvents(t, recorder))
+
+		template := *role.GetLeaderWorkerPattern().TemplateSource.Template
+		template.Spec.Containers[0].Command = []string{"python"}
+		spec, err := renderResolvedPosition(t, plan, leaderPos(), template)
+		require.NoError(t, err)
+
+		engine := spec.Spec.Containers[0]
+		// the role-side insert is outermost: it ran after the profile-side
+		// insert and wrapped it
+		assert.Equal(t, []string{"role-wrap", "profile-wrap", "python"}, engine.Command)
+		// the role-side env append landed after the profile's
+		assert.Equal(t, []string{"PROF_ENV", "ROLE_ENV"}, envNames(engine))
+	})
 }
 
 // TestEngineRuntimeSplitDeliveryDanglingMount pins the KEP test-plan row
@@ -658,6 +700,21 @@ func roleJp(container, path string, value any) workloadsv1alpha2.EngineRuntimeCo
 	return workloadsv1alpha2.EngineRuntimeContainerPatch{Container: container, JSONPatch: patch.JSONPatch}
 }
 
+// declaredContainersOf mirrors the resolver's capture of one profile's
+// declared container names (init containers and sidecars) — the
+// profile-declared half of a role-side patch entry's target vocabulary.
+func declaredContainersOf(profile *workloadsv1alpha2.ClusterEngineRuntimeProfile) map[string]struct{} {
+	declared := make(map[string]struct{},
+		len(profile.Spec.InitContainers)+len(profile.Spec.Containers))
+	for _, c := range profile.Spec.InitContainers {
+		declared[c.Name] = struct{}{}
+	}
+	for _, c := range profile.Spec.Containers {
+		declared[c.Name] = struct{}{}
+	}
+	return declared
+}
+
 // envNames returns a container's env var names, in list order.
 func envNames(c v1.Container) []string {
 	names := make([]string, 0, len(c.Env))
@@ -667,14 +724,14 @@ func envNames(c v1.Container) []string {
 	return names
 }
 
-// TestApplyRoleEngineRuntimePatches pins the KEP-531 application order — the
-// role-side containerPatches pass over the profile-declared init containers
-// and sidecars the fragment/legacy-merge pass rendered into the position,
-// after the profile-side pass, last. Errors attribute to the role's
-// reference, never the profile; a target the role's own template declares —
-// a spec.containers or spec.initContainers member — is a render error even
-// though the profile declares the name too, because the rendered
-// same-named container is role-owned.
+// TestApplyRoleEngineRuntimePatches pins the KEP-531 role-side patch pass:
+// its place in the application order (after the profile-side pass, last) and
+// the D8 target resolution — a target may be role-declared (a spec.containers
+// or spec.initContainers member of the role's own template, no consent
+// involved) or declared by this reference's own profile, and a name the
+// role's own template also declares resolves to the role-owned container —
+// the same precedence injection applies. Errors attribute to the role's
+// reference, never the profile.
 func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 	ctx := context.Background()
 
@@ -691,13 +748,15 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 	t.Run("role-side patches fire on profile-declared sidecars and init containers", func(t *testing.T) {
 		spec := renderSpec()
 		roleContainerNames := roleContainers("engine") // captured before injection
+		profile := renderProfile()
 		InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
-			Profile: renderProfile(),
+			Profile: profile,
 			Runtime: workloadsv1alpha2.EngineRuntime{ProfileName: "ik"},
 		}})
 
 		require.NoError(t, ApplyRoleEngineRuntimePatches(ctx, spec, roleContainerNames, nil, []EngineRuntimeRolePatch{{
-			ProfileName: "ik",
+			ProfileName:        "ik",
+			DeclaredContainers: declaredContainersOf(profile),
 			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
 				roleJp("runtime-sidecar", "/env/-", v1.EnvVar{Name: "A", Value: "b"}),
 				roleJp("runtime-init", "/args/-", "--flag"),
@@ -714,52 +773,48 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 		assert.Equal(t, []string{"--base", "--flag"}, spec.Spec.InitContainers[0].Args)
 	})
 
-	t.Run("an env name the legacy merge appended conflicts with a role-side patch", func(t *testing.T) {
+	t.Run("a role-declared container target applies with no consent involved", func(t *testing.T) {
+		// D8: the reference is the single toggle for all profile-coupled
+		// modification, so its patches may couple to the role's own
+		// containers; patchContainers gates the profile's rules only.
 		spec := renderSpec()
-		// the profile sidecar declares env X and the role's legacy containers
-		// entry appends a same-named X — both land before the patch passes,
-		// so the §5.4 refusal rule must catch the collision.
-		InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
-			Profile: renderProfile(v1.EnvVar{Name: "X", Value: "profile"}),
-			Runtime: workloadsv1alpha2.EngineRuntime{
-				ProfileName: "ik",
-				Containers: []v1.Container{{
-					Name: "runtime-sidecar",
-					Env:  []v1.EnvVar{{Name: "X", Value: "role"}},
-				}},
-			},
-		}})
-		require.Len(t, spec.Spec.Containers[1].Env, 2) // the legacy merge landed
+		roleContainerNames := roleContainers("engine") // captured before injection
 
-		err := ApplyRoleEngineRuntimePatches(ctx, spec, roleContainers("engine"), nil, []EngineRuntimeRolePatch{{
-			ProfileName: "ik",
+		require.NoError(t, ApplyRoleEngineRuntimePatches(ctx, spec, roleContainerNames, nil, []EngineRuntimeRolePatch{{
+			ProfileName:        "ik",
+			DeclaredContainers: map[string]struct{}{}, // the profile declares nothing
 			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
-				roleJp("runtime-sidecar", "/env/-", v1.EnvVar{Name: "X", Value: "patch"}),
+				roleJp("engine", "/env/-", v1.EnvVar{Name: "ROLE_X", Value: "b"}),
 			},
-		}}, "worker")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), `role "worker" engineRuntimes["ik"].containerPatches[0]`)
-		assert.Contains(t, err.Error(), "add cannot join values")
+		}}, "worker"))
+
+		require.Len(t, spec.Spec.Containers, 1)
+		assert.Equal(t, []string{"PYTHONPATH", "ROLE_X"}, envNames(spec.Spec.Containers[0]))
 	})
 
-	t.Run("a target absent from the rendered spec is a render error", func(t *testing.T) {
+	t.Run("a role-declared init container target applies", func(t *testing.T) {
+		// the legacy containers merge cannot reach init containers — the
+		// patch grammar closes that gap
 		spec := renderSpec()
-		InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
-			Profile: renderProfile(),
-			Runtime: workloadsv1alpha2.EngineRuntime{ProfileName: "ik"},
-		}})
-		err := ApplyRoleEngineRuntimePatches(ctx, spec, roleContainers("engine"), nil, []EngineRuntimeRolePatch{{
-			ProfileName: "ik",
+		spec.Spec.InitContainers = []v1.Container{{
+			Name: "role-init", Image: "role-init:latest", Args: []string{"--base"},
+		}}
+		roleContainerNames := roleContainers("engine")
+		roleInitContainerNames := roleContainers("role-init")
+
+		require.NoError(t, ApplyRoleEngineRuntimePatches(ctx, spec, roleContainerNames, roleInitContainerNames, []EngineRuntimeRolePatch{{
+			ProfileName:        "ik",
+			DeclaredContainers: map[string]struct{}{},
 			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
-				roleJp("ghost", "/env/-", v1.EnvVar{Name: "A", Value: "b"}),
+				roleJp("role-init", "/args/-", "--flag"),
 			},
-		}}, "worker")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not present in the rendered spec")
-		assert.Contains(t, err.Error(), `role "worker" engineRuntimes["ik"].containerPatches[0]`)
+		}}, "worker"))
+
+		require.Len(t, spec.Spec.InitContainers, 1)
+		assert.Equal(t, []string{"--base", "--flag"}, spec.Spec.InitContainers[0].Args)
 	})
 
-	t.Run("a target the role's own template declares is a render error even though the profile declares the name", func(t *testing.T) {
+	t.Run("a name declared by both the role template and the profile resolves to the role-owned container", func(t *testing.T) {
 		profile := renderProfile()
 		// the profile also declares a sidecar colliding with the role's engine
 		profile.Spec.Containers = append(profile.Spec.Containers, v1.Container{Name: "engine", Image: "profile-engine:latest"})
@@ -774,23 +829,27 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 		require.Len(t, spec.Spec.Containers, 2)
 		assert.Equal(t, "sglang:latest", spec.Spec.Containers[0].Image)
 
-		err := ApplyRoleEngineRuntimePatches(ctx, spec, roleContainerNames, nil, []EngineRuntimeRolePatch{{
-			ProfileName: "ik",
+		require.NoError(t, ApplyRoleEngineRuntimePatches(ctx, spec, roleContainerNames, nil, []EngineRuntimeRolePatch{{
+			ProfileName:        "ik",
+			DeclaredContainers: declaredContainersOf(profile),
 			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
 				roleJp("engine", "/env/-", v1.EnvVar{Name: "A", Value: "b"}),
 			},
-		}}, "worker")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "which the role's own template declares")
-		assert.Contains(t, err.Error(), `role "worker" engineRuntimes["ik"].containerPatches[0]`)
+		}}, "worker"))
+
+		// the patch landed on the role-owned engine, not a profile-declared
+		// same-named container
+		engine := spec.Spec.Containers[0]
+		assert.Equal(t, "sglang:latest", engine.Image)
+		assert.Equal(t, []string{"PYTHONPATH", "A"}, envNames(engine))
 	})
 
-	t.Run("an init container target the role's own template declares is a render error even though the profile declares the name", func(t *testing.T) {
+	t.Run("an init container name declared by both the role template and the profile resolves to the role-owned init container", func(t *testing.T) {
 		profile := renderProfile()
 		spec := renderSpec()
 		// the role's own template declares an init container colliding with
 		// the profile's runtime-init (declaring args so the patch would be
-		// legal if it fired)
+		// legal on either owner)
 		spec.Spec.InitContainers = []v1.Container{{
 			Name: "runtime-init", Image: "role-init:latest", Args: []string{"--base"},
 		}}
@@ -805,15 +864,97 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 		require.Len(t, spec.Spec.InitContainers, 1)
 		assert.Equal(t, "role-init:latest", spec.Spec.InitContainers[0].Image)
 
-		err := ApplyRoleEngineRuntimePatches(ctx, spec, roleContainerNames, roleInitContainerNames, []EngineRuntimeRolePatch{{
-			ProfileName: "ik",
+		require.NoError(t, ApplyRoleEngineRuntimePatches(ctx, spec, roleContainerNames, roleInitContainerNames, []EngineRuntimeRolePatch{{
+			ProfileName:        "ik",
+			DeclaredContainers: declaredContainersOf(profile),
 			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
 				roleJp("runtime-init", "/args/-", "--flag"),
 			},
+		}}, "worker"))
+
+		// the patch landed on the role-owned init container
+		assert.Equal(t, "role-init:latest", spec.Spec.InitContainers[0].Image)
+		assert.Equal(t, []string{"--base", "--flag"}, spec.Spec.InitContainers[0].Args)
+	})
+
+	t.Run("an env name the legacy merge appended conflicts with a role-side patch", func(t *testing.T) {
+		spec := renderSpec()
+		// the profile sidecar declares env X and the role's legacy containers
+		// entry appends a same-named X — both land before the patch passes,
+		// so the §5.4 refusal rule must catch the collision.
+		profile := renderProfile(v1.EnvVar{Name: "X", Value: "profile"})
+		InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
+			Profile: profile,
+			Runtime: workloadsv1alpha2.EngineRuntime{
+				ProfileName: "ik",
+				Containers: []v1.Container{{
+					Name: "runtime-sidecar",
+					Env:  []v1.EnvVar{{Name: "X", Value: "role"}},
+				}},
+			},
+		}})
+		require.Len(t, spec.Spec.Containers[1].Env, 2) // the legacy merge landed
+
+		err := ApplyRoleEngineRuntimePatches(ctx, spec, roleContainers("engine"), nil, []EngineRuntimeRolePatch{{
+			ProfileName:        "ik",
+			DeclaredContainers: declaredContainersOf(profile),
+			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
+				roleJp("runtime-sidecar", "/env/-", v1.EnvVar{Name: "X", Value: "patch"}),
+			},
 		}}, "worker")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "which the role's own template declares")
 		assert.Contains(t, err.Error(), `role "worker" engineRuntimes["ik"].containerPatches[0]`)
+		assert.Contains(t, err.Error(), "add cannot join values")
+	})
+
+	t.Run("a profile-declared target absent from the rendered spec is a render error", func(t *testing.T) {
+		// the name is inside this reference's declared vocabulary, but the
+		// position never rendered it (here: no fragment pass ran)
+		spec := renderSpec()
+		err := ApplyRoleEngineRuntimePatches(ctx, spec, roleContainers("engine"), nil, []EngineRuntimeRolePatch{{
+			ProfileName:        "ik",
+			DeclaredContainers: declaredContainersOf(renderProfile()),
+			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
+				roleJp("runtime-sidecar", "/env/-", v1.EnvVar{Name: "A", Value: "b"}),
+			},
+		}}, "worker")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not present in the rendered spec")
+		assert.Contains(t, err.Error(), `role "worker" engineRuntimes["ik"].containerPatches[0]`)
+	})
+
+	t.Run("a target declared only by a different reference's profile is a render error", func(t *testing.T) {
+		// a name injected only by a different reference or profile is
+		// outside this reference's target vocabulary
+		spec := renderSpec()
+		profile := renderProfile()
+		InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
+			Profile: profile,
+			Runtime: workloadsv1alpha2.EngineRuntime{ProfileName: "ik"},
+		}})
+		other := makeProfile("other", nil)
+		other.Spec.Containers = []v1.Container{{Name: "other-sidecar", Image: "other:latest"}}
+		InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
+			Profile: other,
+			Runtime: workloadsv1alpha2.EngineRuntime{ProfileName: "other"},
+		}})
+		// the other profile's sidecar is rendered into the position...
+		require.NotNil(t, findRenderedContainer(spec, "other-sidecar"))
+
+		// ...but is not addressable by this reference's patches
+		err := ApplyRoleEngineRuntimePatches(ctx, spec, roleContainers("engine"), nil, []EngineRuntimeRolePatch{{
+			ProfileName:        "ik",
+			DeclaredContainers: declaredContainersOf(profile),
+			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
+				roleJp("other-sidecar", "/env/-", v1.EnvVar{Name: "A", Value: "b"}),
+			},
+		}}, "worker")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(),
+			`role "worker" engineRuntimes["ik"].containerPatches[0] targets container "other-sidecar", `+
+				`which is neither role-declared nor declared by the profile`)
+		// the other profile's sidecar gained nothing
+		assert.Empty(t, findRenderedContainer(spec, "other-sidecar").Env)
 	})
 
 	t.Run("profile-side and role-side patches both fire in application order", func(t *testing.T) {
@@ -849,7 +990,8 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 			},
 		}}
 		roleEntries := []EngineRuntimeRolePatch{{
-			ProfileName: "ik",
+			ProfileName:        "ik",
+			DeclaredContainers: declaredContainersOf(profile),
 			Patches: []workloadsv1alpha2.EngineRuntimeContainerPatch{
 				roleJp("runtime-sidecar", "/command/0", "role-wrap"),
 				roleJp("runtime-sidecar", "/env/-", v1.EnvVar{Name: "ROLE_X", Value: "$(PROF_X)"}),

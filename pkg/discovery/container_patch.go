@@ -79,9 +79,8 @@ func renderedVolumeNames(podSpec *v1.PodTemplateSpec) map[string]struct{} {
 // exactly one patch field; today only `jsonPatch` exists, and an element
 // with no patch field set is a render error attributed to the profile
 // (the CEL exactly-one rule normally rejects it at write time).
-// roleContainerNames
-// holds the spec.containers names the role's own template declared,
-// captured by the caller before any profile fragment injection —
+// roleContainerNames holds the spec.containers names the role's own template
+// declared, captured by the caller before any profile fragment injection —
 // profile-injected containers and role-declared initContainers are
 // therefore never addressable.
 //
@@ -174,19 +173,15 @@ func ApplyEngineRuntimePatches(
 }
 
 // ApplyRoleEngineRuntimePatches applies the role-side containerPatches of
-// one position's references to the profile-declared containers rendered
-// into it, in reference order then list order — the KEP-531 application order,
-// after the fragment/legacy-merge pass, the built-in injector chain and the
-// profile-side pass: role-side patches land last.
-// The resolver already rejected targets the profile does not declare; here
-// a target must additionally exist in the rendered spec and must not
-// collide with a container or init container the role's own template
-// declares — findRenderedProfileContainer scans spec.initContainers first,
-// so either set alone would let a role-owned same-named container through,
-// and that container is role-owned even when the profile declares the same
-// name. roleContainerNames and roleInitContainerNames hold the names the
-// role's own template declared, captured by the caller before any profile
-// fragment injection.
+// one position's references, in reference order then list order — the
+// KEP-531 application order, after the fragment/legacy-merge pass, the
+// built-in injector chain and the profile-side pass: role-side patches land
+// last. Each entry's target resolves per D8 against the role-declared names
+// captured by the caller before any profile fragment injection plus the
+// container names this reference's own profile declares; anything else — a
+// name injected only by a different reference or profile — is a render
+// error. roleContainerNames and roleInitContainerNames hold the names the
+// role's own template declared (spec.containers and spec.initContainers).
 func ApplyRoleEngineRuntimePatches(
 	ctx context.Context,
 	podSpec *v1.PodTemplateSpec,
@@ -203,21 +198,12 @@ func ApplyRoleEngineRuntimePatches(
 	for _, entry := range entries {
 		source := rolePatchSource(roleName, entry.ProfileName)
 		for i, patch := range entry.Patches {
-			_, roleOwned := roleContainerNames[patch.Container]
-			if !roleOwned {
-				_, roleOwned = roleInitContainerNames[patch.Container]
-			}
-			if roleOwned {
-				return fmt.Errorf(
-					"%s[%d] targets container %q, which the role's own template declares; "+
-						"role-side patches address profile-declared containers only",
-					source.describe(), i, patch.Container)
-			}
-			container := findRenderedProfileContainer(podSpec, patch.Container)
-			if container == nil {
-				return fmt.Errorf(
-					"%s[%d] targets container %q, which is not present in the rendered spec",
-					source.describe(), i, patch.Container)
+			container, err := resolveRolePatchTarget(
+				podSpec, roleContainerNames, roleInitContainerNames, entry.DeclaredContainers,
+				source, i, patch.Container,
+			)
+			if err != nil {
+				return err
 			}
 			if err := applyJSONPatch(logger, container, *patch.JSONPatch, volumeNames, source, patch.Container, i); err != nil {
 				return err
@@ -227,9 +213,64 @@ func ApplyRoleEngineRuntimePatches(
 	return nil
 }
 
+// resolveRolePatchTarget resolves one role-side patch target to its rendered
+// container, per the KEP-531 D8 precedence: (1) a name the role's own
+// template declares in spec.containers — the role-owned member; (2) a name
+// it declares in spec.initContainers — the role-owned init container (the
+// legacy containers merge cannot reach init containers; the patch grammar
+// closes that gap); (3) a name this reference's own profile declares,
+// located by name in the rendered pod — init containers included,
+// profile-declared targets span both lists; (4) anything else is a render
+// error. A name the role's own template also declares resolves to the
+// role-owned container — the same precedence injection applies.
+func resolveRolePatchTarget(
+	podSpec *v1.PodTemplateSpec,
+	roleContainerNames map[string]struct{},
+	roleInitContainerNames map[string]struct{},
+	declaredContainers map[string]struct{},
+	source patchSource,
+	idx int,
+	name string,
+) (*v1.Container, error) {
+	if _, ok := roleContainerNames[name]; ok {
+		if container := findRenderedContainer(podSpec, name); container != nil {
+			return container, nil
+		}
+	}
+	if _, ok := roleInitContainerNames[name]; ok {
+		if container := findRenderedInitContainer(podSpec, name); container != nil {
+			return container, nil
+		}
+	}
+	if _, ok := declaredContainers[name]; ok {
+		container := findRenderedProfileContainer(podSpec, name)
+		if container == nil {
+			return nil, fmt.Errorf(
+				"%s[%d] targets container %q, which is not present in the rendered spec",
+				source.describe(), idx, name)
+		}
+		return container, nil
+	}
+	return nil, fmt.Errorf(
+		"%s[%d] targets container %q, which is neither role-declared nor declared by the profile",
+		source.describe(), idx, name)
+}
+
+// findRenderedInitContainer finds an init container by name in the rendered
+// spec's spec.initContainers — the locator for a role-declared init
+// container target (role-owned under the append-if-missing merge).
+func findRenderedInitContainer(podSpec *v1.PodTemplateSpec, name string) *v1.Container {
+	for i := range podSpec.Spec.InitContainers {
+		if podSpec.Spec.InitContainers[i].Name == name {
+			return &podSpec.Spec.InitContainers[i]
+		}
+	}
+	return nil
+}
+
 // findRenderedProfileContainer finds a container by name in the rendered
-// spec — init containers first, then sidecars — because role-side patches
-// address profile-declared init containers and sidecars alike.
+// spec — init containers first, then sidecars — because profile-declared
+// targets include init containers and sidecars alike.
 func findRenderedProfileContainer(podSpec *v1.PodTemplateSpec, name string) *v1.Container {
 	for i := range podSpec.Spec.InitContainers {
 		if podSpec.Spec.InitContainers[i].Name == name {
