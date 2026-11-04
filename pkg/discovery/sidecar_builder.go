@@ -28,12 +28,20 @@ import (
 // fragments into one position's rendered pod spec, in reference order:
 // initContainers, containers (sidecars) and volumes append-if-missing
 // (name-keyed, therefore idempotent), then the role-side Containers override
-// appends env/args to profile-provided containers. Fragment application
-// cannot fail: the resolver has already fetched and validated the profiles,
-// so overlapping fragment delivery and unknown override names are no-ops.
+// appends env/args to profile-provided containers, once per reference exactly
+// as on main. Env appending joins the KEP-531 shared env-name conflict check
+// spanning all three passes: an override entry whose name the target
+// container already declares — from the role's own template, the profile, an
+// earlier reference's merge or anything else already rendered at that point —
+// is a render error attributed to the role-side override (role name,
+// reference and containers index), never a silent second entry. Args
+// appending carries no conflict check; main's behavior is untouched.
+// roleName attributes those errors to the role whose engineRuntimes authored
+// the overrides. Overlapping fragment delivery and unknown override names
+// remain no-ops.
 func InjectEngineRuntimeFragments(
-	ctx context.Context, podSpec *v1.PodTemplateSpec, fragments []EngineRuntimeFragment,
-) {
+	ctx context.Context, podSpec *v1.PodTemplateSpec, fragments []EngineRuntimeFragment, roleName string,
+) error {
 	logger := log.FromContext(ctx)
 	for _, fragment := range fragments {
 		profileContainerNames := make(
@@ -58,7 +66,7 @@ func InjectEngineRuntimeFragments(
 			}
 		}
 		// override containers based on the role-side runtime entry
-		for _, container := range fragment.Runtime.Containers {
+		for i, container := range fragment.Runtime.Containers {
 			if _, owned := profileContainerNames[container.Name]; !owned {
 				logger.V(1).Info(fmt.Sprintf(
 					"rbg runtime has container %s but not in clusterEngineRuntime, skip override",
@@ -66,24 +74,51 @@ func InjectEngineRuntimeFragments(
 				))
 				continue
 			}
-			for i, c := range podSpec.Spec.Containers {
-				if c.Name == container.Name {
-					if len(container.Env) > 0 {
-						podSpec.Spec.Containers[i].Env = append(podSpec.Spec.Containers[i].Env, container.Env...)
-					}
-					if len(container.Args) > 0 {
-						podSpec.Spec.Containers[i].Args = append(podSpec.Spec.Containers[i].Args, container.Args...)
-					}
-					break
+			for j, c := range podSpec.Spec.Containers {
+				if c.Name != container.Name {
+					continue
 				}
+				target := &podSpec.Spec.Containers[j]
+				for _, env := range container.Env {
+					if hasNamedEnv(target.Env, env.Name) {
+						// The legacy merge appends; it cannot compose with an
+						// existing value (join semantics), so the collision is
+						// an error attributed to the role-side override rather
+						// than a silent second entry — the same refusal rule
+						// the patch passes enforce.
+						return fmt.Errorf(
+							"role %q engineRuntimes[%q].containers[%d] appends env var %q to container %q, "+
+								"which already declares it; the legacy containers merge cannot join values — "+
+								"a same-named entry must come from the role template or the override, never both",
+							roleName, fragment.Runtime.ProfileName, i, env.Name, container.Name,
+						)
+					}
+					target.Env = append(target.Env, env)
+				}
+				if len(container.Args) > 0 {
+					target.Args = append(target.Args, container.Args...)
+				}
+				break
 			}
 		}
 	}
+	return nil
 }
 
 func hasNamedContainer(containers []v1.Container, name string) bool {
 	for _, c := range containers {
 		if c.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// hasNamedEnv reports whether the env list already carries the given name —
+// the legacy containers merge's share of the shared env-name conflict check.
+func hasNamedEnv(envs []v1.EnvVar, name string) bool {
+	for _, env := range envs {
+		if env.Name == name {
 			return true
 		}
 	}

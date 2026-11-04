@@ -177,10 +177,22 @@ func (r *PodReconciler) ConstructPodTemplateSpecApplyConfiguration(
 		for _, c := range podTemplateSpec.Spec.InitContainers {
 			roleInitContainerNames[c.Name] = struct{}{}
 		}
-		discovery.InjectEngineRuntimeFragments(
+		// The fragment pass's legacy containers merge carries the KEP-531
+		// shared env-name conflict check: an override entry whose name the
+		// target container already declares is a render error attributed to
+		// the role-side override, so it surfaces as an RBG condition like
+		// every other render-pass failure.
+		if err := discovery.InjectEngineRuntimeFragments(
 			ctx, &podTemplateSpec,
 			r.engineRuntimePlan.FragmentApplications[r.engineRuntimePosition],
-		)
+			r.engineRuntimePlan.RoleName,
+		); err != nil {
+			if r.recorder != nil {
+				r.recorder.Event(rbg, corev1.EventTypeWarning, discovery.ReasonEngineRuntimeRenderFailed,
+					fmt.Sprintf("engine runtime render failed: %s", err.Error()))
+			}
+			return nil, discovery.NewRenderError(fmt.Errorf("failed to inject engine runtime fragments: %w", err))
+		}
 	}
 	if utils.ContainsString(r.injectObjects, commonEnvInjector) {
 		if err := injector.InjectEnv(ctx, &podTemplateSpec, rbg, role); err != nil {

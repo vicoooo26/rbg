@@ -201,10 +201,118 @@ func TestInjectEngineRuntimeFragments(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			InjectEngineRuntimeFragments(ctx, tt.podSpec, tt.fragments)
+			require.NoError(t, InjectEngineRuntimeFragments(ctx, tt.podSpec, tt.fragments, "worker"))
 			tt.verify(t, tt.podSpec)
 		})
 	}
+}
+
+// TestInjectEngineRuntimeFragmentsLegacyEnvConflict pins the KEP-531 shared
+// env-name conflict check on the legacy containers merge: repeated references
+// append their overrides once per reference, exactly as on main, but an
+// append whose name the target container already declares — from the role's
+// own template, the profile's own declaration or an earlier reference's
+// merge — is a render error attributed to the role-side override (role name,
+// reference and containers index), never a silent second entry. Args
+// appending carries no conflict check: main's behavior is untouched.
+func TestInjectEngineRuntimeFragmentsLegacyEnvConflict(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("an override env name the role template already declares is a render error", func(t *testing.T) {
+		// append-if-missing keeps the role's own same-named container, so the
+		// override applies to it — and its env name collides with the role's
+		spec := &v1.PodTemplateSpec{Spec: v1.PodSpec{Containers: []v1.Container{
+			{Name: "engine", Image: "sglang:latest"},
+			{Name: "ik-sidecar", Image: "role-sidecar:latest",
+				Env: []v1.EnvVar{{Name: "IK_SITE", Value: "/role"}}},
+		}}}
+		err := InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
+			Profile: sidecarProfile("ik", nil),
+			Runtime: workloadsv1alpha2.EngineRuntime{
+				ProfileName: "ik",
+				Containers: []v1.Container{{
+					Name: "ik-sidecar",
+					Env:  []v1.EnvVar{{Name: "IK_SITE", Value: "/opt/ik/site"}},
+				}},
+			},
+		}}, "worker")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `role "worker" engineRuntimes["ik"].containers[0]`)
+		assert.Contains(t, err.Error(), `"IK_SITE"`)
+		// the role template's entry stands: no second same-named entry landed
+		sidecar := spec.Spec.Containers[1]
+		require.Len(t, sidecar.Env, 1)
+		assert.Equal(t, "/role", sidecar.Env[0].Value)
+	})
+
+	t.Run("an override env name the profile's own container declares is a render error", func(t *testing.T) {
+		// the profile declares env on its sidecar; the role's override appends
+		// the same name onto the profile-injected container
+		profile := sidecarProfile("ik", nil)
+		profile.Spec.Containers[0].Env = []v1.EnvVar{{Name: "IK_SITE", Value: "/profile"}}
+		spec := renderSpec()
+		err := InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
+			Profile: profile,
+			Runtime: workloadsv1alpha2.EngineRuntime{
+				ProfileName: "ik",
+				Containers: []v1.Container{{
+					Name: "ik-sidecar",
+					Env:  []v1.EnvVar{{Name: "IK_SITE", Value: "/opt/ik/site"}},
+				}},
+			},
+		}}, "worker")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `role "worker" engineRuntimes["ik"].containers[0]`)
+		assert.Contains(t, err.Error(), `"IK_SITE"`)
+		// the profile's own entry stands: no second same-named entry landed
+		require.Len(t, spec.Spec.Containers, 2)
+		assert.Equal(t, []string{"IK_SITE"}, envNames(spec.Spec.Containers[1]))
+	})
+
+	t.Run("two references of one profile overriding the same env name: the second append errors", func(t *testing.T) {
+		// the KEP's duplicate-delivery case: each reference appends its
+		// override once, exactly as on main, so the second one collides with
+		// the first — the shared conflict check guards the result
+		spec := renderSpec()
+		override := workloadsv1alpha2.EngineRuntime{
+			ProfileName: "ik",
+			Containers: []v1.Container{{
+				Name: "ik-sidecar",
+				Env:  []v1.EnvVar{{Name: "IK_SITE", Value: "/opt/ik/site"}},
+			}},
+		}
+		err := InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{
+			{Profile: sidecarProfile("ik", nil), Runtime: override},
+			{Profile: sidecarProfile("ik", nil), Runtime: override},
+		}, "worker")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `role "worker" engineRuntimes["ik"].containers[0]`)
+		assert.Contains(t, err.Error(), `"IK_SITE"`)
+		// the first reference's append landed; the second never did
+		require.Len(t, spec.Spec.Containers, 2)
+		assert.Equal(t, []string{"IK_SITE"}, envNames(spec.Spec.Containers[1]))
+	})
+
+	t.Run("an override env name new to the container still appends, args untouched", func(t *testing.T) {
+		// the compatible shape: a new env name appends, and args appending
+		// carries no conflict check (main's behavior)
+		spec := renderSpec()
+		err := InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
+			Profile: sidecarProfile("ik", nil),
+			Runtime: workloadsv1alpha2.EngineRuntime{
+				ProfileName: "ik",
+				Containers: []v1.Container{{
+					Name: "ik-sidecar",
+					Env:  []v1.EnvVar{{Name: "IK_SITE", Value: "/opt/ik/site"}},
+					Args: []string{"--ik-flag"},
+				}},
+			},
+		}}, "worker")
+		require.NoError(t, err)
+		sidecar := spec.Spec.Containers[1]
+		assert.Equal(t, []string{"IK_SITE"}, envNames(sidecar))
+		assert.Equal(t, []string{"--ik-flag"}, sidecar.Args)
+	})
 }
 
 func TestApplyEngineRuntimePatches(t *testing.T) {
@@ -323,7 +431,7 @@ func TestEngineRuntimeFullRender(t *testing.T) {
 	spec := renderSpec()
 	roleContainerNames := roleContainers("engine") // captured before injection
 
-	InjectEngineRuntimeFragments(ctx, spec, fragments)
+	require.NoError(t, InjectEngineRuntimeFragments(ctx, spec, fragments, "worker"))
 	_, err := ApplyEngineRuntimePatches(ctx, spec, roleContainerNames, entries)
 	require.NoError(t, err)
 
@@ -386,7 +494,10 @@ func renderResolvedPosition(
 		roleVolumeNames[vol.Name] = struct{}{}
 	}
 	ctx := context.Background()
-	InjectEngineRuntimeFragments(ctx, spec, plan.FragmentApplications[position])
+	if err := InjectEngineRuntimeFragments(
+		ctx, spec, plan.FragmentApplications[position], plan.RoleName); err != nil {
+		return spec, err
+	}
 	profilePositionalInserts, err := ApplyEngineRuntimePatches(
 		ctx, spec, roleContainerNames, plan.PatchApplications[position])
 	if err != nil {
@@ -782,10 +893,10 @@ func TestEngineRuntimeTargetingBoundary(t *testing.T) {
 	t.Run("a patch aimed at a profile-injected container is a render error", func(t *testing.T) {
 		spec := renderSpec()
 		roleContainerNames := roleContainers("engine") // captured before injection
-		InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
+		require.NoError(t, InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
 			Profile: sidecarProfile("ik", nil),
 			Runtime: workloadsv1alpha2.EngineRuntime{ProfileName: "ik"},
-		}})
+		}}, "worker"))
 		// the sidecar the profile itself injected is present in the rendered spec...
 		assert.Equal(t, []string{"engine", "ik-sidecar"}, containerNames(spec))
 
@@ -810,10 +921,10 @@ func TestEngineRuntimeTargetingBoundary(t *testing.T) {
 			{Name: "ik-sidecar", Image: "role-sidecar:latest"},
 		}}}
 		roleContainerNames := roleContainers("engine", "ik-sidecar") // captured before injection
-		InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
+		require.NoError(t, InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
 			Profile: sidecarProfile("ik", nil),
 			Runtime: workloadsv1alpha2.EngineRuntime{ProfileName: "ik"},
-		}})
+		}}, "worker"))
 		// append-if-missing kept the role's own container
 		require.Len(t, spec.Spec.Containers, 2)
 		assert.Equal(t, "role-sidecar:latest", spec.Spec.Containers[1].Image)
@@ -888,10 +999,10 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 		spec := renderSpec()
 		roleContainerNames := roleContainers("engine") // captured before injection
 		profile := renderProfile()
-		InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
+		require.NoError(t, InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
 			Profile: profile,
 			Runtime: workloadsv1alpha2.EngineRuntime{ProfileName: "ik"},
-		}})
+		}}, "worker"))
 
 		_, err := ApplyRoleEngineRuntimePatches(ctx, spec, roleContainerNames, nil, nil, []EngineRuntimeRolePatch{{
 			ProfileName:        "ik",
@@ -962,10 +1073,10 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 		profile.Spec.Containers = append(profile.Spec.Containers, v1.Container{Name: "engine", Image: "profile-engine:latest"})
 		spec := renderSpec()
 		roleContainerNames := roleContainers("engine") // captured before injection
-		InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
+		require.NoError(t, InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
 			Profile: profile,
 			Runtime: workloadsv1alpha2.EngineRuntime{ProfileName: "ik"},
-		}})
+		}}, "worker"))
 		// append-if-missing kept the role's own engine: the rendered
 		// same-named container is role-owned
 		require.Len(t, spec.Spec.Containers, 2)
@@ -998,10 +1109,10 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 		}}
 		roleContainerNames := roleContainers("engine") // captured before injection
 		roleInitContainerNames := roleContainers("runtime-init")
-		InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
+		require.NoError(t, InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
 			Profile: profile,
 			Runtime: workloadsv1alpha2.EngineRuntime{ProfileName: "ik"},
-		}})
+		}}, "worker"))
 		// append-if-missing kept the role's own runtime-init: the rendered
 		// same-named init container is role-owned
 		require.Len(t, spec.Spec.InitContainers, 1)
@@ -1023,11 +1134,12 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 
 	t.Run("an env name the legacy merge appended conflicts with a role-side patch", func(t *testing.T) {
 		spec := renderSpec()
-		// the profile sidecar declares env X and the role's legacy containers
-		// entry appends a same-named X — both land before the patch passes,
-		// so the §5.4 refusal rule must catch the collision.
-		profile := renderProfile(v1.EnvVar{Name: "X", Value: "profile"})
-		InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
+		// the role's legacy containers entry appends env X — a name new to the
+		// profile sidecar, so the merge lands — and the role-side patch then
+		// re-adds the same X: both land before the patch passes, so the
+		// shared env-name conflict check must catch the collision.
+		profile := renderProfile()
+		require.NoError(t, InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
 			Profile: profile,
 			Runtime: workloadsv1alpha2.EngineRuntime{
 				ProfileName: "ik",
@@ -1036,8 +1148,8 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 					Env:  []v1.EnvVar{{Name: "X", Value: "role"}},
 				}},
 			},
-		}})
-		require.Len(t, spec.Spec.Containers[1].Env, 2) // the legacy merge landed
+		}}, "worker"))
+		require.Len(t, spec.Spec.Containers[1].Env, 1) // the legacy merge landed
 
 		_, err := ApplyRoleEngineRuntimePatches(ctx, spec, roleContainers("engine"), nil, nil, []EngineRuntimeRolePatch{{
 			ProfileName:        "ik",
@@ -1072,16 +1184,16 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 		// outside this reference's target vocabulary
 		spec := renderSpec()
 		profile := renderProfile()
-		InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
+		require.NoError(t, InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
 			Profile: profile,
 			Runtime: workloadsv1alpha2.EngineRuntime{ProfileName: "ik"},
-		}})
+		}}, "worker"))
 		other := makeProfile("other", nil)
 		other.Spec.Containers = []v1.Container{{Name: "other-sidecar", Image: "other:latest"}}
-		InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
+		require.NoError(t, InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
 			Profile: other,
 			Runtime: workloadsv1alpha2.EngineRuntime{ProfileName: "other"},
-		}})
+		}}, "worker"))
 		// the other profile's sidecar is rendered into the position...
 		require.NotNil(t, findRenderedContainer(spec, "other-sidecar"))
 
@@ -1144,7 +1256,7 @@ func TestApplyRoleEngineRuntimePatches(t *testing.T) {
 
 		spec := renderSpec()
 		roleContainerNames := roleContainers("engine") // captured before injection
-		InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{fragment})
+		require.NoError(t, InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{fragment}, "worker"))
 		profileInserts, err := ApplyEngineRuntimePatches(ctx, spec, roleContainerNames, profileEntries)
 		require.NoError(t, err)
 		shadowed, err := ApplyRoleEngineRuntimePatches(
@@ -1218,10 +1330,10 @@ func TestApplyRoleEngineRuntimePatchesOneWay(t *testing.T) {
 		spec := renderSpec()
 		spec.Spec.Volumes = []v1.Volume{roleVol}
 		profile := declaringProfile("ik")
-		InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
+		require.NoError(t, InjectEngineRuntimeFragments(ctx, spec, []EngineRuntimeFragment{{
 			Profile: profile,
 			Runtime: workloadsv1alpha2.EngineRuntime{ProfileName: "ik"},
-		}})
+		}}, "worker"))
 		return spec
 	}
 
