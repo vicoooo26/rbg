@@ -141,8 +141,10 @@ the defects this KEP answers:
 - The legacy `containers` env/args merge keeps working unchanged, within the
   reference's component scope.
 - Pre-existing objects render byte-for-byte identically to main.
-- Validation is split: CEL at write time checks shape only; vocabularies and
-  existence are decided at render time.
+- Validation is split: CEL at write time checks shape only; the cross-field
+  presence rule runs in the admission webhooks (its CEL form exceeds the
+  apiserver's per-CRD cost budget); vocabularies and existence are decided at
+  render time.
 
 ## Non-Goals
 
@@ -416,7 +418,7 @@ RBG carries `component`/`targetContainers` from the group template.
 
 The absent-column expansion applies to pod-level injection (and the legacy
 `containers` merge). `targetContainers` normally requires `component`; that is
-the write-time CEL rule, with one exception: standalonePattern has exactly one
+the write-time webhook rule, with one exception: standalonePattern has exactly one
 component, so a reference may list `targetContainers` with `component`
 omitted, attaching to the role's own component. A written `component`
 unequal to the role's name fails the same render vocabulary check as any
@@ -1058,37 +1060,38 @@ and enforcement was never status's to begin with.
 
 ### Validation Model
 
-CEL at write time checks shape and field presence only: the DNS-label patterns
-on container names, list bounds, the `op` enum, the five-root path allowlist
-(shared rule text and messages on both the CERP and the reference side), and the
-cross-field presence rule. The rule attaches to `RoleSpec` because the standalone
-exemption needs `standalonePattern`, inline in `RoleSpec` (the same access the
-existing pattern mutual-exclusion rule uses), which a rule scoped to the
-`engineRuntimes` field cannot see:
+CEL at write time checks shape only: the DNS-label patterns on container
+names, list bounds, the `op` enum, and the five-root path allowlist (shared
+rule text and messages on both the CERP and the reference side). The
+cross-field presence rule — `targetContainers` requires `component`, except
+under `standalonePattern` — is enforced by the admission webhooks
+(`ValidateEngineRuntimes`, run by the RoleBasedGroup and RoleBasedGroupSet
+validators and re-run by the render-time resolver as the authoritative
+backstop), not by CEL. The CEL form of the rule is a comprehension over the
+uncapped `engineRuntimes` list scoped at the uncapped `roles[]`, and the
+apiserver's CEL cost estimate rejects the CRD carrying it by more than 100x
+the per-CRD budget. `TestGeneratedCRDsAdmitNoRoleSpecCELPresenceRule`
+(api/workloads/v1alpha2/rolebasedgroup_crd_celcost_test.go) pins this as an
+executable invariant: the generated CRDs stamped with the rule below fail
+`ValidateCustomResourceDefinition`, while the unmodified CRDs validate
+cleanly, so the rejection is attributable to the rule alone. The rule as
+originally sketched was:
 
 ```go
 // +kubebuilder:validation:XValidation:rule="!has(self.engineRuntimes) || self.engineRuntimes.all(p, !has(p.targetContainers) || has(p.component) || has(self.standalonePattern))",message="targetContainers requires component to be set, except under standalonePattern"
 type RoleSpec struct { /* fields as published */ }
 ```
 
-The rule's inner term stays single: the entry-level `extraPatches` are
-structurally nested inside their `targetContainers` entry (gating the list
-gates them), and `targetContainers` is `+listType=map` keyed by `name`, so
-duplicate names are rejected by the apiserver for free. The rule as written is
-the v1alpha2 form; the v1alpha1 mirror carries a version-specific predicate,
-because v1alpha1 `RoleSpec` has no `standalonePattern` field. Standalone is
-the conversion default when neither `leaderWorkerSet` nor `components` is set
-(`rolebasedgroup_conversion.go`), so copying the rule verbatim would fail CEL
-type checking and block the CRD upgrade. The v1alpha1 form substitutes the
-native shape, `!has(self.leaderWorkerSet) && !(has(self.components) &&
-size(self.components) > 0)`, matching the Hub conversion's pattern inference
-exactly: the conversion switches on `len(components) > 0`, while CEL `has()`
-is true for a present-but-empty list. And `components: []` is writable
-(`+optional`, no `MinItems`), so a bare `!has(self.components)` would treat
-that degenerate shape as pattern-set and reject a v1alpha1 write whose
-conversion default is StandalonePattern. envtest pins rule compilation in
-both versions and the exemption firing through a v1alpha1 write, including
-the empty-`components` edge.
+If the apiserver's cost model ever admits the rule, the pin fails loudly and
+the placement can be revisited. The webhook form needs no version-specific
+v1alpha1 predicate: the shared validation runs on the converted Hub object,
+so the standalone exemption reads `standalonePattern` directly, and the
+v1alpha1 empty-`components` edge is handled by the conversion's pattern
+inference rather than re-encoded in rule text. The entry-level
+`extraPatches` are structurally nested inside their `targetContainers`
+entry (gating the list gates them), and `targetContainers` is
+`+listType=map` keyed by `name`, so duplicate names are rejected by the
+apiserver for free.
 
 The reference-side Go shape: `EngineRuntime` keeps `profileName` and the
 legacy `containers` and inert `injectContainers` exactly as published
@@ -1192,7 +1195,7 @@ The four write-time scenarios for (`component`, `targetContainers`):
 | 1 | absent | absent | injection and legacy merge across the pattern's default components; no patches; warning event iff the profile declares `containerPatches` | **rendered output byte-for-byte identical to main**; the warning event is the only possible delta, and a pre-KEP profile cannot trigger it (item 1 below) |
 | 2 | set | absent | injection and legacy merge to the named component only; no patches; warning event iff the profile declares `containerPatches` | new capability: scope narrowing for components main's default reaches, scope extension for those it does not (`worker` under leaderWorkerPattern) |
 | 3 | set | present | injection to the named component; the profile's `containerPatches` fire at every listed role-declared entry, and each entry's `extraPatches` land after them (a profile-declared entry fires only its own) | new capability: the full precise-targeting path |
-| 4 | absent | present | under standalonePattern: attaches to the pattern's single component (the CEL exemption); under the other patterns: apiserver rejects at write time (CEL rule) | new capability under standalonePattern; impossible state elsewhere, never reaches render |
+| 4 | absent | present | under standalonePattern: attaches to the pattern's single component (the webhook exemption); under the other patterns: the admission webhook rejects at write time | new capability under standalonePattern; impossible state elsewhere, never reaches render |
 
 1. **Pre-existing references are byte-for-byte stable.** References that set
    only `profileName` render identically to main; a pre-KEP profile has no
@@ -1447,8 +1450,11 @@ Alpha (v0.9.0):
 - [ ] Field surfaces landed: CERP `spec.containerPatches`; RBG `component`,
   `targetContainers` entries with `extraPatches` (v1alpha2 + v1alpha1 mirror via
   `convertEngineRuntimes`)
-- [ ] CEL rules generated into both served schemas (the role-level cross-field
-  rule, the five-root path allowlist, the DNS-label entry-name rule)
+- [ ] CEL rules generated into both served schemas (the five-root path
+  allowlist, the DNS-label entry-name rule); the role-level cross-field
+  presence rule enforced in the admission webhooks instead — its CEL form
+  exceeds the apiserver's per-CRD cost budget, pinned by
+  `TestGeneratedCRDsAdmitNoRoleSpecCELPresenceRule`
 - [ ] Shared validation function wired at all call sites (RoleBasedGroup and
   RoleBasedGroupSet webhooks with `failurePolicy: Fail`, resolver backstop); a
   child RBG carries `component`/`targetContainers` from the group template
@@ -1525,7 +1531,12 @@ Downgrade depths exist to avoid exactly that.
 controller swap in pass one (it binds on pre-existing CERP fields). The
 persisted reference tracking lands with the CRD in pass two (Version skew
 below). Adoption is per-workload (`component` or `targetContainers`), never
-cluster-wide, and begins only after pass two.
+cluster-wide, and begins only after pass two. One cosmetic window between the
+passes: the new CERP status fields the new controller writes are pruned by the
+old CRD schema, and nothing re-triggers that write until a reference changes
+or the controller restarts — the gap is display-only and self-healing, since
+enforcement was never status's to begin with (the count and condition rebuild
+on the next reconcile after pass two).
 
 **Chart follow-up.** A chart sequencing change that defers the CRD hook until
 the new controller is ready would make the two passes unnecessary; it is an
@@ -1633,7 +1644,7 @@ the CRD was retained; after a CRD rollback the pruned specs must be rewritten.
   which no-ops for init containers and cannot deliver mounts. Superseded by
   consolidation into `targetContainers` with per-entry `extraPatches` (adopted):
   one reviewable entry per container holds consent, profile delivery and role
-  rules; `+listType=map` rejects duplicate names; the cross-field CEL rule needs
+  rules; `+listType=map` rejects duplicate names; the cross-field presence rule needs
   one list-scan term per entry, plus the standalone exemption. Accepted cost:
   role patches on a role-declared container imply consent to the profile's
   patches there, tolerable because role patches land after the profile's and an
