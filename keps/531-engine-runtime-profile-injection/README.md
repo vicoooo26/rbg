@@ -1070,11 +1070,12 @@ validators and re-run by the render-time resolver as the authoritative
 backstop), not by CEL. The CEL form of the rule is a comprehension over the
 uncapped `engineRuntimes` list scoped at the uncapped `roles[]`, and the
 apiserver's CEL cost estimate rejects the CRD carrying it by more than 100x
-the per-CRD budget. `TestGeneratedCRDsAdmitNoRoleSpecCELPresenceRule`
-(api/workloads/v1alpha2/rolebasedgroup_crd_celcost_test.go) pins this as an
-executable invariant: the generated CRDs stamped with the rule below fail
-`ValidateCustomResourceDefinition`, while the unmodified CRDs validate
-cleanly, so the rejection is attributable to the rule alone. The rule as
+the per-CRD budget. The envtest spec "KEP-531 presence rule placement"
+(test/envtest/testcase/rbg/engine_runtime_celcost_test.go) pins this as an
+executable invariant against the suite's kube-apiserver: a server-side
+dry-run create of the generated CRDs stamped with the rule below is
+rejected, while the unmodified CRDs are admitted, so the rejection is
+attributable to the rule alone. The rule as
 originally sketched was:
 
 ```go
@@ -1453,8 +1454,8 @@ Alpha (v0.9.0):
 - [ ] CEL rules generated into both served schemas (the five-root path
   allowlist, the DNS-label entry-name rule); the role-level cross-field
   presence rule enforced in the admission webhooks instead — its CEL form
-  exceeds the apiserver's per-CRD cost budget, pinned by
-  `TestGeneratedCRDsAdmitNoRoleSpecCELPresenceRule`
+  exceeds the apiserver's per-CRD cost budget, pinned by the envtest spec
+  "KEP-531 presence rule placement"
 - [ ] Shared validation function wired at all call sites (RoleBasedGroup and
   RoleBasedGroupSet webhooks with `failurePolicy: Fail`, resolver backstop); a
   child RBG carries `component`/`targetContainers` from the group template
